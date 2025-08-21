@@ -7,8 +7,8 @@
 
 using Number = uint32_t;
 
-
-size_t VALUE_SIZE = sizeof(Number);
+using ValueType = Number;
+static constexpr size_t VALUE_SIZE = sizeof(ValueType);
 
 
 

@@ -1,73 +1,55 @@
+// MasterPage.cpp
 #include "MasterPage.hpp"
-#include <unistd.h>
-#include <stdio.h>
+#include <unistd.h>   // lseek, read, write, ftruncate, fsync
+#include <cstdio>
+#include <cerrno>
+#include <cstring>
 
-
-
-
-MasterPage MasterPage::load(int fd){
-    off_t seekRes = lseek(fd,0,SEEK_SET);
-    if(seekRes == -1){
-        printf("Error with lseek inside MasterPage");
-        
+MasterPage MasterPage::initnew(int fd, uint16_t pageSize, int numColumns) {
+    // Truncate file to exactly one page
+    if (ftruncate(fd, pageSize) == -1) {
+        perror("ftruncate");
     }
 
     MasterPage mp;
-    ssize_t n = read(fd, &mp, sizeof(mp));
-    if(n!=sizeof(mp)){
-        printf("Error reading MasterPage from file");
-    }
+    mp.magic      = 0x4D445042;              
+    mp.pageSize   = pageSize;
+    mp.numColumns = numColumns;
+    mp.headPageIDs.assign(numColumns, UINT16_MAX);
 
-    return mp;
-
-    
-
-
-
-
-}
-
-MasterPage MasterPage::initnew(int fd, int pageSize, int numCols){
-    ftruncate(fd, pageSize);
-
-    MasterPage mp;
-    mp.magic = 0x4D445042;
-    mp.pageSize = pageSize;
-    mp.numCols = numCols;
-    mp.headPageIDS.assign(numCols, UINT16_MAX); // no free pages yet
-
-    // write to disk
-
-    lseek(fd,0,SEEK_SET);
-    write(fd, &mp.magic, sizeof(mp.magic) );
-    write(fd, &mp.pageSize,sizeof(mp.pageSize));
-    write(fd, &mp.numCols,sizeof(mp.numCols));
-    write(fd, mp.headPageIDS.data(),numCols * sizeof(uint16_t));
+    // Write fixed fields + vector data to offset 0
+    lseek(fd, 0, SEEK_SET);
+    write(fd, &mp.magic,      sizeof(mp.magic));
+    write(fd, &mp.pageSize,   sizeof(mp.pageSize));
+    write(fd, &mp.numColumns, sizeof(mp.numColumns));
+    write(fd, mp.headPageIDs.data(),
+          numColumns * sizeof(uint16_t));
     fsync(fd);
-    return mp;
 
-     
+    return mp;
 }
 
-MasterPage MasterPage::load(int fd){
+MasterPage MasterPage::load(int fd) {
     MasterPage mp;
-    lseek(fd,0,SEEK_SET);
-    read(fd,&mp.magic,sizeof(mp.magic));
-    read(fd,&mp.pageSize,sizeof(mp.pageSize));
-    read(fd, &mp.numCols,sizeof(numCols));
-    mp.headPageIDS.resize(mp.numCols);
-    read(fd,&mp.headPageIDS,mp.numCols *sizeof(uint16_t));
-    return mp;
 
+    lseek(fd, 0, SEEK_SET);
+    read(fd, &mp.magic,      sizeof(mp.magic));
+    read(fd, &mp.pageSize,   sizeof(mp.pageSize));
+    read(fd, &mp.numColumns, sizeof(mp.numColumns));
+
+    mp.headPageIDs.resize(mp.numColumns);
+    read(fd, mp.headPageIDs.data(),
+         mp.numColumns * sizeof(uint16_t));
+
+    return mp;
 }
 
 void MasterPage::flush(int fd) const {
-    off_t seekRes = lseek(fd,0,SEEK_SET);
-    
-
-    
-
-
-
+    lseek(fd, 0, SEEK_SET);
+    write(fd, &magic,      sizeof(magic));
+    write(fd, &pageSize,   sizeof(pageSize));
+    write(fd, &numColumns, sizeof(numColumns));
+    write(fd, headPageIDs.data(),
+          headPageIDs.size() * sizeof(uint16_t));
+    fsync(fd);
 }
-
