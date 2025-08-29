@@ -1,0 +1,12 @@
+[MetalDBG] Step 0: begin, n=6
+[MetalDBG] No default device, enumerating…
+[MetalDBG] Step 1: device = Apple M3 Pro
+[MetalDBG] Step 2: command queue ok
+[MetalDBG] Step 3: library compiled
+[MetalDBG] Step 4: function resolved
+[MetalDBG] Step 5: pipeline ok, maxThreads=1024
+[MetalDBG] Step 6: buffers ok
+[MetalDBG] Step 7: uploads ok
+[MetalDBG] Step 8: encoded dispatch (n=6, tgs=256)
+[MetalDBG] Step 9: GPU completed
+[MetalDBG] Step 10: readback ok (count=3)

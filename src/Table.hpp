@@ -1,47 +1,60 @@
-// Table.hpp
 #pragma once
-#include "MasterPage.hpp"
-#include "ColumnFile.hpp"
-#include "ValueTypes.hpp"
-
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <optional>
-#include <cstdint>
+
+#include "ValueTypes.hpp"
+#include "MasterPage.hpp"
+#include "ColumnFile.hpp"
+#include "RowIndex.hpp"
 
 class Table {
 public:
-    // path: the single file backing this table’s columns
-    // numColumns: number of columns in this table
+    struct Materialized {
+        std::vector<ValueType>   values;
+        std::vector<uint32_t>    rowIDs;
+    };
+
+    // Constructors
     Table(const std::string& path, uint16_t pageSize, uint16_t numColumns);
+    Table(const std::string& path);
 
-    // reopen using an existing master page in that file
-    explicit Table(const std::string& path);
+    // Knobs
+    void setUseGPU(bool on)            { useGPU_ = on; }
+    void setGPUThreshold(size_t n)     { gpuThreshold_ = n; }
 
-    // Insert a full row (values.size() must equal numColumns)
-    // Returns a new rowID (0-based)
+    // Core ops
     uint32_t insertRow(const std::vector<ValueType>& values);
-
-    // Fetch a row: vector<optional<ValueType>> so tombstoned cells show as nullopt
     std::vector<std::optional<ValueType>> fetchRow(uint32_t rowID);
-
-    // Delete a row across all columns (tombstone)
     void deleteRow(uint32_t rowID);
 
-    uint16_t numColumns() const { return static_cast<uint16_t>(cols_.size()); }
-    uint32_t rowCount() const   { return static_cast<uint32_t>(rowToSlots_.size()); }
+    // Scans / Aggregates
+    std::vector<ValueType> materializeColumn(uint16_t colIdx);
+    Materialized materializeColumnWithRowIDs(uint16_t colIdx);
+
+    // Hybrid scan (CPU for small / no-GPU; GPU for large)
+    std::vector<uint32_t> scanEquals(uint16_t colIdx, ValueType val);
+
+    // CPU-only sum (you already had this)
+    ValueType sumColumn(uint16_t colIdx);
+
+    // Hybrid sum (CPU for small / no-GPU; GPU for large)
+    ValueType sumColumnHybrid(uint16_t colIdx);
 
 private:
-    std::string path_;
-    int         fd_;           // underlying file descriptor for MasterPage I/O
-    MasterPage  mp_;           // page-0 metadata (in memory)
-
-    // one ColumnFile per column
-    std::vector<ColumnFile> cols_;
-
-    // row-to-slot mapping: for each row, store the 32-bit slot id per column
-    // rowToSlots_[rowID][colIdx] -> (pageID<<16)|slotIdx
-    std::vector<std::vector<uint32_t>> rowToSlots_;
-
     void openOrCreate(uint16_t pageSize, uint16_t numColumns, bool create);
+
+    // CPU helper (over materialized vectors)
+    std::vector<uint32_t> scanEqualsCPUFromMaterialized(uint16_t colIdx, ValueType val);
+
+    std::string           path_;
+    int                   fd_;
+    MasterPage            mp_;
+    std::vector<ColumnFile> cols_;
+    RowIndex              rowIndex_;
+
+    // GPU usage knobs (single definition!)
+    bool   useGPU_       = true;
+    size_t gpuThreshold_ = 4096;
 };
