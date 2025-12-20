@@ -1,9 +1,10 @@
 // Table.cpp
 #include "Table.hpp"
+#include "ColumnFile.hpp"  
 #include <fcntl.h>
 #include <unistd.h>
 #include <cassert>
-
+#include <unordered_map>
 // GPU hooks (implemented in gpu_scan_equals.mm)
 extern "C" bool metalIsAvailable();
 std::vector<uint32_t>
@@ -33,6 +34,56 @@ void Table::openOrCreate(uint16_t pageSize, uint16_t numColumns, bool create) {
     rowIndex_.openOrCreate();
 }
 
+extern "C" std::vector<uint32_t>
+gpuScanBetween(const std::vector<uint32_t>& values,
+               const std::vector<uint32_t>& rowIDs,
+               uint32_t lo, uint32_t hi);
+
+
+std::vector<uint32_t> Table::whereBetween(uint16_t colIdx, ValueType lo, ValueType hi) {
+    assert(colIdx < cols_.size());
+
+    std::vector<ValueType> values; values.reserve(1024);
+    std::vector<uint32_t>  rowIDs; rowIDs.reserve(1024);
+
+    // Cache min/max per pageID to avoid repeated header reads
+    std::unordered_map<uint16_t, std::pair<ValueType,ValueType>> cache;
+
+    rowIndex_.forEachLive([&](uint32_t rowID, const std::vector<uint32_t>& slots){
+        uint32_t slotID = slots[colIdx];
+        // Use the public helper (or: uint16_t pid = uint16_t(slotID >> 16);)
+        uint16_t pid = ColumnFile::pageIdFromSlotId(slotID);
+
+        auto it = cache.find(pid);
+        if (it == cache.end()) {
+            auto mm = cols_[colIdx].zoneMap(pid);  // <— CHEAP header peek
+            it = cache.emplace(pid, mm).first;
+        }
+
+        const auto [pmin, pmax] = it->second;
+        if (pmax < lo || pmin > hi) return; // prune page
+
+        // Candidate: fetch actual value and check
+        auto v = cols_[colIdx].fetchSlot(slotID);
+        if (v) {
+            values.push_back(*v);
+            rowIDs.push_back(rowID);
+        }
+    });
+
+    // CPU small path
+    const size_t n = values.size();
+    if (!useGPU_ || n < gpuThreshold_ || !metalIsAvailable()) {
+        std::vector<uint32_t> out; out.reserve(n);
+        for (size_t i = 0; i < n; ++i)
+            if (values[i] >= lo && values[i] <= hi) out.push_back(rowIDs[i]);
+        return out;
+    }
+
+    // GPU path
+    return gpuScanBetween(values, rowIDs, static_cast<uint32_t>(lo), static_cast<uint32_t>(hi));
+}
+
 Table::Table(const std::string& path, uint16_t pageSize, uint16_t numColumns)
   : path_(path), fd_(-1), rowIndex_(path, numColumns) {
     openOrCreate(pageSize, numColumns, /*create=*/true);
@@ -41,6 +92,27 @@ Table::Table(const std::string& path, uint16_t pageSize, uint16_t numColumns)
 Table::Table(const std::string& path)
   : path_(path), fd_(-1), rowIndex_(path, 0) {
     openOrCreate(/*pageSize*/0, /*numColumns*/0, /*create=*/false);
+}
+
+std::vector<std::vector<ValueType>>
+Table::projectRows(const std::vector<uint32_t>& rowIDs, const std::vector<uint16_t>& cols) {
+    std::vector<std::vector<ValueType>> out;
+    out.reserve(rowIDs.size());
+    for (uint32_t rid : rowIDs) {
+        auto slotsOpt = rowIndex_.fetch(rid);
+        if (!slotsOpt) continue; // deleted
+        const auto& slots = *slotsOpt;
+        std::vector<ValueType> row;
+        row.reserve(cols.size());
+        bool ok = true;
+        for (uint16_t c : cols) {
+            auto v = cols_[c].fetchSlot(slots[c]);
+            if (!v) { ok = false; break; }
+            row.push_back(*v);
+        }
+        if (ok) out.push_back(std::move(row));
+    }
+    return out;
 }
 
 uint32_t Table::insertRow(const std::vector<ValueType>& values) {

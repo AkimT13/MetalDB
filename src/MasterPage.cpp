@@ -29,6 +29,34 @@ MasterPage MasterPage::initnew(int fd, uint16_t pageSize, int numColumns) {
     return mp;
 }
 
+void MasterPage::flush(int fd) const {
+    off_t ok = lseek(fd, 0, SEEK_SET);
+    if (ok == (off_t)-1) {
+        std::perror("MasterPage::flush lseek");
+        return;
+    }
+
+    if (write(fd, &magic, sizeof(magic)) != ssize_t(sizeof(magic))) {
+        std::perror("MasterPage::flush write(magic)");
+        return;
+    }
+    if (write(fd, &pageSize, sizeof(pageSize)) != ssize_t(sizeof(pageSize))) {
+        std::perror("MasterPage::flush write(pageSize)");
+        return;
+    }
+    if (write(fd, &numColumns, sizeof(numColumns)) != ssize_t(sizeof(numColumns))) {
+        std::perror("MasterPage::flush write(numColumns)");
+        return;
+    }
+    if (!headPageIDs.empty()) {
+        const size_t bytes = headPageIDs.size() * sizeof(uint16_t);
+        if (write(fd, headPageIDs.data(), bytes) != ssize_t(bytes)) {
+            std::perror("MasterPage::flush write(headPageIDs)");
+            return;
+        }
+    }
+    fsync(fd);
+}
 MasterPage MasterPage::load(int fd) {
     MasterPage mp;
 
@@ -44,12 +72,4 @@ MasterPage MasterPage::load(int fd) {
     return mp;
 }
 
-void MasterPage::flush(int fd) const {
-    lseek(fd, 0, SEEK_SET);
-    write(fd, &magic,      sizeof(magic));
-    write(fd, &pageSize,   sizeof(pageSize));
-    write(fd, &numColumns, sizeof(numColumns));
-    write(fd, headPageIDs.data(),
-          headPageIDs.size() * sizeof(uint16_t));
-    fsync(fd);
-}
+
