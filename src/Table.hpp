@@ -45,6 +45,10 @@ public:
     // Hybrid sum (CPU for small / no-GPU; GPU for large)
     ValueType sumColumnHybrid(uint16_t colIdx);
 
+    // Min/max via zone-map metadata (header-only reads)
+    ValueType minColumn(uint16_t colIdx);
+    ValueType maxColumn(uint16_t colIdx);
+
     std::vector<std::vector<ValueType>>
     projectRows(const std::vector<uint32_t> &rowIDs, const std::vector<uint16_t> &cols);
     // Helper access for algos: expose column file and a forEach wrapper

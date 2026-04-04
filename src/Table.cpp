@@ -218,6 +218,35 @@ std::vector<uint32_t> Table::scanEquals(uint16_t colIdx, ValueType val) {
     return gpuScanEquals(m.values, m.rowIDs, static_cast<uint32_t>(val));
 }
 
+ValueType Table::minColumn(uint16_t colIdx) {
+    assert(colIdx < cols_.size());
+    // Collect distinct page IDs touched by live rows, then take min of page zone-map mins.
+    std::unordered_map<uint16_t, std::pair<ValueType,ValueType>> cache;
+    rowIndex_.forEachLive([&](uint32_t /*rowID*/, const std::vector<uint32_t>& slots){
+        uint16_t pid = ColumnFile::pageIdFromSlotId(slots[colIdx]);
+        if (cache.find(pid) == cache.end())
+            cache.emplace(pid, cols_[colIdx].zoneMap(pid));
+    });
+    ValueType result = std::numeric_limits<ValueType>::max();
+    for (auto& [pid, mm] : cache)
+        if (mm.first < result) result = mm.first;
+    return result;
+}
+
+ValueType Table::maxColumn(uint16_t colIdx) {
+    assert(colIdx < cols_.size());
+    std::unordered_map<uint16_t, std::pair<ValueType,ValueType>> cache;
+    rowIndex_.forEachLive([&](uint32_t /*rowID*/, const std::vector<uint32_t>& slots){
+        uint16_t pid = ColumnFile::pageIdFromSlotId(slots[colIdx]);
+        if (cache.find(pid) == cache.end())
+            cache.emplace(pid, cols_[colIdx].zoneMap(pid));
+    });
+    ValueType result = std::numeric_limits<ValueType>::min();
+    for (auto& [pid, mm] : cache)
+        if (mm.second > result) result = mm.second;
+    return result;
+}
+
 // gpu_sum host entry
 uint64_t gpuSumU32(const std::vector<uint32_t>& values);
 

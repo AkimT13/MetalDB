@@ -4,7 +4,8 @@ LDFLAGS  := -framework Metal -framework Foundation
 
 # Core sources (both .cpp and .mm)
 SRCS := MasterPage.cpp Column.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
-        gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm 
+        gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm \
+        Engine.cpp GroupBy.cpp Join.cpp
 
 # Object files (+ auto-generated dependency files)
 OBJS := $(SRCS:.cpp=.o)
@@ -12,7 +13,8 @@ OBJS := $(OBJS:.mm=.o)
 DEPS := $(OBJS:.o=.d)
 
 # Tests
-TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range
+TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
+         test_engine test_groupby test_join
 
 all: $(TESTS)
 
@@ -58,6 +60,15 @@ test_persist_pages: $(OBJS) tests/test_persist_pages.cpp
 test_where_range: $(OBJS) tests/test_where_range.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+test_engine: $(OBJS) tests/test_engine.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+test_groupby: $(OBJS) tests/test_groupby.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+test_join: $(OBJS) tests/test_join.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 .PHONY: run clean fast
 
 # Run the full suite
@@ -67,6 +78,9 @@ run: all
 	./test_scan_hybrid
 	./test_persist_pages
 	./test_where_range
+	./test_engine
+	./test_groupby
+	./test_join
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)
@@ -75,7 +89,7 @@ fast: $(TESTS)
 
 clean:
 	rm -f $(OBJS) $(DEPS) $(TESTS) mdb mdb.o
-	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx
+	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx *.mdb *.mdb.idx
 
 # Include dependency files (safe if missing)
 -include $(DEPS)

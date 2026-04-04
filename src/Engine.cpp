@@ -1,4 +1,6 @@
 #include "Engine.hpp"
+#include "GroupBy.hpp"
+#include "Join.hpp"
 #include <cassert>
 
 std::string Engine::tablePath(const std::string& name) const {
@@ -33,4 +35,43 @@ std::vector<uint32_t> Engine::whereBetween(const std::string& name, uint16_t col
 
 ValueType Engine::sum(const std::string& name, uint16_t col) {
     return openTable(name).sumColumnHybrid(col);
+}
+
+ValueType Engine::minColumn(const std::string& name, uint16_t col) {
+    return openTable(name).minColumn(col);
+}
+
+ValueType Engine::maxColumn(const std::string& name, uint16_t col) {
+    return openTable(name).maxColumn(col);
+}
+
+std::unordered_map<ValueType, uint64_t>
+Engine::groupCount(const std::string& name, uint16_t keyCol) {
+    return GroupBy::countByKey(openTable(name), keyCol);
+}
+
+std::unordered_map<ValueType, uint64_t>
+Engine::groupSum(const std::string& name, uint16_t keyCol, uint16_t valCol) {
+    return GroupBy::sumByKey(openTable(name), keyCol, valCol);
+}
+
+std::unordered_map<ValueType, double>
+Engine::groupAvg(const std::string& name, uint16_t keyCol, uint16_t valCol) {
+    return GroupBy::avgByKey(openTable(name), keyCol, valCol);
+}
+
+std::unordered_map<ValueType, ValueType>
+Engine::groupMin(const std::string& name, uint16_t keyCol, uint16_t valCol) {
+    return GroupBy::minByKey(openTable(name), keyCol, valCol);
+}
+
+std::unordered_map<ValueType, ValueType>
+Engine::groupMax(const std::string& name, uint16_t keyCol, uint16_t valCol) {
+    return GroupBy::maxByKey(openTable(name), keyCol, valCol);
+}
+
+std::vector<std::pair<uint32_t,uint32_t>>
+Engine::join(const std::string& left, uint16_t leftCol,
+             const std::string& right, uint16_t rightCol) {
+    return Join::hashJoinEq(openTable(left), leftCol, openTable(right), rightCol);
 }
