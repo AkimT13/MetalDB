@@ -18,11 +18,16 @@ public:
     ColumnFile(const std::string &path, MasterPage &mp, uint16_t colIdx);
     ~ColumnFile();
 
+    // ── Legacy API (UINT32 columns) ──────────────────────────────────────────
     // Allocate a slot, write `val`, and return a 32-bit ID = (pageID<<16)|slotIdx
     uint32_t allocSlot(ValueType val);
 
     // Read back a slot; returns std::nullopt if it was deleted/tombstoned
     std::optional<ValueType> fetchSlot(uint32_t id);
+
+    // ── Typed API ────────────────────────────────────────────────────────────
+    uint32_t             allocTypedSlot(const ColValue& val);
+    std::optional<ColValue> fetchTypedSlot(uint32_t id) const;
 
     // Delete (tombstone) a slot, returning its space to the free-page list
     void deleteSlot(uint32_t id);
@@ -33,8 +38,10 @@ public:
     // Number of pages = file_size / pageSize_
     uint16_t pageCount() const;
 
-    // Cheap zone-map read (header-only): returns {minValue, maxValue}
+    // Cheap zone-map read (header-only): returns {minValue, maxValue} as uint32_t
     std::pair<ValueType, ValueType> zoneMap(uint16_t pageID) const;
+
+    ColType colType() const { return colType_; }
 
     // Decode composite slotID
     static inline uint16_t pageIdFromSlotId(uint32_t id) { return uint16_t(id >> 16); }
@@ -45,14 +52,14 @@ private:
     MasterPage &mp_;    // reference to the page-0 metadata
     uint16_t colIdx_;   // which column (0 <= colIdx_ < mp_.numColumns)
     uint16_t pageSize_; // copy of mp_.pageSize for convenience
+    ColType  colType_;  // type tag for this column
+    uint16_t valueBytes_; // bytes per slot: 4 or 8
 
     // Load or create a page with free slots; returns its pageID
     uint16_t allocateOrFetchPage();
 
-    // Read a ColumnPage from disk into memory
+    // Read / write a typed page
     ColumnPage loadPage(uint16_t pageID);
-
-    // Write a ColumnPage back to disk
     void flushPage(const ColumnPage &page);
 
     // Helpers to get/set the head of our free-page list

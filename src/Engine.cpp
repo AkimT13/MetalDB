@@ -13,6 +13,14 @@ Table& Engine::createTable(const std::string& name, uint16_t numCols, uint16_t p
     return *p;
 }
 
+Table& Engine::createTypedTable(const std::string& name,
+                                const std::vector<ColType>& colTypes,
+                                uint16_t pageSize) {
+    auto p = std::make_shared<Table>(tablePath(name), pageSize, colTypes);
+    tables_[name] = p;
+    return *p;
+}
+
 Table& Engine::openTable(const std::string& name) {
     auto it = tables_.find(name);
     if (it != tables_.end()) return *(it->second);
@@ -23,6 +31,10 @@ Table& Engine::openTable(const std::string& name) {
 
 uint32_t Engine::insert(const std::string& name, const std::vector<ValueType>& row) {
     return openTable(name).insertRow(row);
+}
+
+uint32_t Engine::insertTyped(const std::string& name, const std::vector<ColValue>& row) {
+    return openTable(name).insertTypedRow(row);
 }
 
 std::vector<uint32_t> Engine::whereEq(const std::string& name, uint16_t col, ValueType v) {

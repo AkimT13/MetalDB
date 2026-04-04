@@ -19,17 +19,21 @@ public:
     };
 
     // Constructors
-    Table(const std::string &path, uint16_t pageSize, uint16_t numColumns);
-    Table(const std::string &path);
+    Table(const std::string &path, uint16_t pageSize, uint16_t numColumns);  // all UINT32
+    Table(const std::string &path, uint16_t pageSize,                        // typed columns
+          const std::vector<ColType>& colTypes);
+    Table(const std::string &path);  // open existing
     std::vector<uint32_t> whereBetween(uint16_t colIdx, ValueType lo, ValueType hi);
 
     // Knobs
     void setUseGPU(bool on) { useGPU_ = on; }
     void setGPUThreshold(size_t n) { gpuThreshold_ = n; }
 
-    // Core ops
+    // Core ops (legacy ValueType / new typed)
     uint32_t insertRow(const std::vector<ValueType> &values);
+    uint32_t insertTypedRow(const std::vector<ColValue> &values);
     std::vector<std::optional<ValueType>> fetchRow(uint32_t rowID);
+    std::vector<std::optional<ColValue>>  fetchTypedRow(uint32_t rowID);
     void deleteRow(uint32_t rowID);
 
     // Scans / Aggregates

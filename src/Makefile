@@ -14,7 +14,7 @@ DEPS := $(OBJS:.o=.d)
 
 # Tests
 TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
-         test_engine test_groupby test_join
+         test_engine test_groupby test_join test_types
 
 all: $(TESTS)
 
@@ -69,6 +69,9 @@ test_groupby: $(OBJS) tests/test_groupby.cpp
 test_join: $(OBJS) tests/test_join.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+test_types: $(OBJS) tests/test_types.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 .PHONY: run clean fast
 
 # Run the full suite
@@ -81,6 +84,7 @@ run: all
 	./test_engine
 	./test_groupby
 	./test_join
+	./test_types
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)

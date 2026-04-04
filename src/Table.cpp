@@ -89,6 +89,21 @@ Table::Table(const std::string& path, uint16_t pageSize, uint16_t numColumns)
     openOrCreate(pageSize, numColumns, /*create=*/true);
 }
 
+Table::Table(const std::string& path, uint16_t pageSize,
+             const std::vector<ColType>& colTypes)
+  : path_(path), fd_(-1), rowIndex_(path, static_cast<uint16_t>(colTypes.size())) {
+    fd_ = open(path_.c_str(), O_RDWR | O_CREAT, 0666);
+    assert(fd_ >= 0);
+    const uint16_t numCols = static_cast<uint16_t>(colTypes.size());
+    mp_ = MasterPage::initnew(fd_, pageSize, colTypes);
+    cols_.clear();
+    cols_.reserve(numCols);
+    for (uint16_t c = 0; c < numCols; ++c)
+        cols_.emplace_back(path_, mp_, c);
+    rowIndex_ = RowIndex(path_, numCols);
+    rowIndex_.openOrCreate();
+}
+
 Table::Table(const std::string& path)
   : path_(path), fd_(-1), rowIndex_(path, 0) {
     openOrCreate(/*pageSize*/0, /*numColumns*/0, /*create=*/false);
@@ -118,22 +133,36 @@ Table::projectRows(const std::vector<uint32_t>& rowIDs, const std::vector<uint16
 uint32_t Table::insertRow(const std::vector<ValueType>& values) {
     assert(values.size() == cols_.size());
     std::vector<uint32_t> slots(values.size());
-    for (size_t c = 0; c < values.size(); ++c) {
+    for (size_t c = 0; c < values.size(); ++c)
         slots[c] = cols_[c].allocSlot(values[c]);
-    }
-    uint32_t rowID = rowIndex_.appendRow(slots);
-    return rowID;
+    return rowIndex_.appendRow(slots);
+}
+
+uint32_t Table::insertTypedRow(const std::vector<ColValue>& values) {
+    assert(values.size() == cols_.size());
+    std::vector<uint32_t> slots(values.size());
+    for (size_t c = 0; c < values.size(); ++c)
+        slots[c] = cols_[c].allocTypedSlot(values[c]);
+    return rowIndex_.appendRow(slots);
 }
 
 std::vector<std::optional<ValueType>> Table::fetchRow(uint32_t rowID) {
     auto slotsOpt = rowIndex_.fetch(rowID);
     std::vector<std::optional<ValueType>> out(cols_.size());
-    if (!slotsOpt) return out; // all nullopt if deleted or out-of-range
-
+    if (!slotsOpt) return out;
     const auto& slots = *slotsOpt;
-    for (size_t c = 0; c < cols_.size(); ++c) {
+    for (size_t c = 0; c < cols_.size(); ++c)
         out[c] = cols_[c].fetchSlot(slots[c]);
-    }
+    return out;
+}
+
+std::vector<std::optional<ColValue>> Table::fetchTypedRow(uint32_t rowID) {
+    auto slotsOpt = rowIndex_.fetch(rowID);
+    std::vector<std::optional<ColValue>> out(cols_.size());
+    if (!slotsOpt) return out;
+    const auto& slots = *slotsOpt;
+    for (size_t c = 0; c < cols_.size(); ++c)
+        out[c] = cols_[c].fetchTypedSlot(slots[c]);
     return out;
 }
 
