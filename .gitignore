@@ -1,28 +1,21 @@
 # Compiled object files and dependency files
-src/*.o
-src/*.d
-src/tests/*.o
-src/tests/*.d
+*.o
+*.d
 
-# Test binaries (no extension on macOS)
-src/test_engine
-src/test_groupby
-src/test_gpu_scan_equals
-src/test_gpu_sum
-src/test_scan_hybrid
-src/test_persist_pages
-src/test_where_range
-src/test_join
-src/test_types
+# Test and scratch binaries (no extension on macOS)
+a.out
+main
+test
+src/test_*
+src/tests/test_*
+src/tests/bench_*
 src/tests/debug*
+src/mdb
 
 # Debug symbol bundles
-src/*.dSYM/
-src/tests/*.dSYM/
+*.dSYM/
 
 # Database data files produced by tests
-src/*.mdb
-src/*.mdb.idx
 *.mdb
 *.mdb.idx
 
