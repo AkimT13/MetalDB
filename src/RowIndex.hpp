@@ -11,8 +11,9 @@ public:
     // pathBase is the table file path; the index lives at pathBase + ".idx"
     RowIndex(const std::string& pathBase, uint16_t numColumns);
 
-    // Open existing (.idx) or create new if missing
-    void openOrCreate();
+    // Open existing (.idx) or create new.
+    // If create=true the file is always truncated and re-initialised.
+    void openOrCreate(bool create = false);
 
     // Append a new row’s slotIDs (size must equal numColumns). Returns rowID.
     uint32_t appendRow(const std::vector<uint32_t>& slotIDs);

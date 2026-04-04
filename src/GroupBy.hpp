@@ -7,12 +7,15 @@
 namespace GroupBy {
 
 // COUNT(*) GROUP BY keyCol
+// useGPU / gpuThreshold mirror Table's GPU knobs.
 std::unordered_map<ValueType, uint64_t>
-countByKey(Table& t, uint16_t keyCol);
+countByKey(Table& t, uint16_t keyCol,
+           bool useGPU = true, size_t gpuThreshold = 4096);
 
 // SUM(valCol) GROUP BY keyCol
 std::unordered_map<ValueType, uint64_t>
-sumByKey(Table& t, uint16_t keyCol, uint16_t valCol);
+sumByKey(Table& t, uint16_t keyCol, uint16_t valCol,
+         bool useGPU = true, size_t gpuThreshold = 4096);
 
 // AVG(valCol) GROUP BY keyCol
 std::unordered_map<ValueType, double>

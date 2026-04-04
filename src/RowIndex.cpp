@@ -12,16 +12,18 @@ static constexpr uint32_t RIDX_MAGIC = 0x52494458; // 'RIDX'
 RowIndex::RowIndex(const std::string& pathBase, uint16_t numColumns)
   : idxPath_(pathBase + ".idx"), numColumns_(numColumns), fd_(-1) {}
 
-void RowIndex::openOrCreate() {
+void RowIndex::openOrCreate(bool create) {
     fd_ = open(idxPath_.c_str(), O_RDWR | O_CREAT, 0666);
     assert(fd_ >= 0);
 
-    // Check if file is empty; if so, write header
-    off_t end = lseek(fd_, 0, SEEK_END);
-    if (end == 0) {
+    if (create) {
+        // Truncate to empty and write a fresh header.
+        if (ftruncate(fd_, 0) == -1) perror("ftruncate(idx)");
         ensureHeaderOnCreate();
+    } else {
+        off_t end = lseek(fd_, 0, SEEK_END);
+        if (end == 0) ensureHeaderOnCreate();
     }
-    // Load entries into memory
     loadAll();
 }
 

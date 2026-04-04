@@ -4,7 +4,7 @@ LDFLAGS  := -framework Metal -framework Foundation
 
 # Core sources (both .cpp and .mm)
 SRCS := MasterPage.cpp Column.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
-        gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm \
+        gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm \
         Engine.cpp GroupBy.cpp Join.cpp
 
 # Object files (+ auto-generated dependency files)
