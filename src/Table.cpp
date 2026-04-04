@@ -31,7 +31,7 @@ void Table::openOrCreate(uint16_t pageSize, uint16_t numColumns, bool create) {
 
     // Initialize/open RowIndex sidecar now that numColumns is known
     rowIndex_ = RowIndex(path_, numColumns);
-    rowIndex_.openOrCreate();
+    rowIndex_.openOrCreate(create);
 }
 
 extern "C" std::vector<uint32_t>
@@ -101,7 +101,7 @@ Table::Table(const std::string& path, uint16_t pageSize,
     for (uint16_t c = 0; c < numCols; ++c)
         cols_.emplace_back(path_, mp_, c);
     rowIndex_ = RowIndex(path_, numCols);
-    rowIndex_.openOrCreate();
+    rowIndex_.openOrCreate(/*create=*/true);
 }
 
 Table::Table(const std::string& path)
