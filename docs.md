@@ -1,186 +1,310 @@
-# MetalDB Prototype Documentation
+# MetalDB — Component Documentation
 
-This document provides detailed documentation for the current components in the MetalDB prototype, covering file layouts, classes, methods, and test harnesses. It will be updated as the project evolves.
+> Last updated: 2026-04-04. For in-progress work and known issues see `PROGRESS.md`.
 
 ---
 
-## 1. ValueTypes.hpp
+## Architecture Overview
 
-**Location:** `include/ValueTypes.hpp`
-
-**Purpose:**
-
-* Defines the canonical payload type for all column data.
-
-**Contents:**
-
-```cpp
-#pragma once
-
-#include <cstdint>
-
-// The low-level storage type for column values
-using Number    = uint32_t;
-using ValueType = Number;
-
-// Compile-time constant for the size of each value
-static constexpr size_t VALUE_SIZE = sizeof(ValueType);
+```
+Engine              public SQL-like facade, table registry
+  └─ Table          per-table insert/fetch/delete/scan/aggregate
+       ├─ ColumnFile    on-disk column storage (one per table)
+       ├─ RowIndex      row→slotID mapping (.mdb.idx sidecar)
+       └─ GPU kernels   gpu_scan_equals, gpu_scan_range, gpu_sum, gpu_groupby
 ```
 
-**Notes:**
-
-* Change `Number` to another fixed-width type (e.g. `double`) here to affect the entire engine.
-* `VALUE_SIZE` is `constexpr`, so it generates no duplicate symbols.
+Each table produces two files:
+- `{name}.mdb` — binary column data. Page 0 is `MasterPage`; subsequent pages are `ColumnPage`s.
+- `{name}.mdb.idx` — row index (`RIDX` magic). Each entry: 1-byte status + 3-byte pad + `uint32_t slotIDs[numColumns]`.
 
 ---
 
-## 2. MasterPage
+## ValueTypes.hpp
 
-### Files
+Defines the core type vocabulary.
 
-* `src/MasterPage.hpp`
-* `src/MasterPage.cpp`
-* `tests/test_masterpage.cpp`
+```cpp
+using ValueType = uint32_t;   // legacy scalar type; all pre-Phase-2 API uses this
 
-### Role
+enum class ColType : uint8_t {
+    UINT32 = 0,   // 4 bytes
+    INT64  = 1,   // 8 bytes
+    FLOAT  = 2,   // 4 bytes
+    DOUBLE = 3,   // 8 bytes
+};
 
-* Manages **page 0** (the master page) of the database file.
-* Stores global metadata:
+uint16_t colValueBytes(ColType t);  // returns 4 or 8
 
-  * **magic**: 4-byte identifier (`0x4D445042`).
-  * **pageSize**: size in bytes of each page.
-  * **numColumns**: number of column streams in the file.
-  * **headPageIDs**: in-memory `std::vector<uint16_t>` of length `numColumns`, each entry pointing to the head of the free-page list for that column.
+struct ColValue {
+    ColType type;
+    union { uint32_t u32; int64_t i64; float f32; double f64; };
+    explicit ColValue(uint32_t);
+    explicit ColValue(int64_t);
+    explicit ColValue(float);
+    explicit ColValue(double);
+    double   toDouble() const;
+    ValueType asU32()  const;
+};
+```
 
-### API
+---
+
+## MasterPage
+
+**Files:** `src/MasterPage.hpp`, `src/MasterPage.cpp`
+
+Page 0 of the `.mdb` file. On-disk layout:
+```
+uint32_t magic         = 0x4D445042
+uint16_t pageSize
+uint16_t numColumns
+uint16_t headPageIDs[numColumns]
+uint8_t  colTypes[numColumns]      ← added Phase 2; absent in old files (defaults UINT32)
+```
 
 ```cpp
 struct MasterPage {
-  uint32_t magic;
-  uint16_t pageSize;
-  uint16_t numColumns;
-  std::vector<uint16_t> headPageIDs;
+    uint32_t magic;
+    uint16_t pageSize, numColumns;
+    std::vector<uint16_t> headPageIDs;
+    std::vector<ColType>  colTypes;      // one per column
 
-  // Initialize a new master page in an empty/truncated file
-  static MasterPage initnew(int fd, uint16_t pageSize, int numColumns);
-
-  // Load an existing master page from disk
-  static MasterPage load(int fd);
-
-  // Write the in-memory master page back to disk (page 0)
-  void flush(int fd) const;
+    static MasterPage initnew(int fd, uint16_t pageSize, uint16_t numColumns);
+    static MasterPage initnew(int fd, uint16_t pageSize, const std::vector<ColType>&);
+    static MasterPage load(int fd);
+    void flush(int fd) const;
 };
 ```
 
-#### `initnew(int fd, uint16_t pageSize, int numColumns)`
+---
 
-* Truncates file to `pageSize` bytes, sets fields, and writes page 0.
-* Initializes each `headPageIDs[i] = UINT16_MAX`.
-* Calls `fsync` to persist.
+## ColumnPage / Column.hpp
 
-#### `load(int fd)`
+**File:** `src/Column.hpp`
 
-* Seeks to offset 0, reads `magic`, `pageSize`, `numColumns`, then resizes and reads `headPageIDs`.
+In-memory representation of one data page. Storage is raw bytes to support variable-width types.
 
-#### `flush(int fd) const`
+```
+Header: pageID, capacity, count, nextFreePage, valueBytes, minValue64, maxValue64
+Data:   uint8_t rawValues[capacity * valueBytes]
+        bool    tombstone[capacity]
+```
 
-* Seeks to offset 0 and writes all fields and the `headPageIDs` array, then `fsync`.
-
-### Test: `test_masterpage.cpp`
-
-* Uses `mkstemp` to create a temp file.
-* Calls `initnew`, asserts correct initial values.
-* Calls `load` to verify persistence.
-* Mutates one `headPageIDs` entry, calls `flush`, reloads, and asserts the change.
-* Prints **MasterPage tests passed!** on success.
+Key methods: `writeRaw(slot, ptr, n)`, `readRaw(slot, ptr, n)`, `recomputeMinMax()`.
+Legacy `writeValue(slot, ValueType)` / `readValue(slot)` wrappers still present for UINT32 columns.
 
 ---
 
-## 3. ColumnPage
+## ColumnFile
 
-### Files
+**Files:** `src/ColumnFile.hpp`, `src/ColumnFile.cpp`
 
-* `src/ColumnPage.hpp`
-* `src/ColumnPage.cpp` (empty; all methods inline)
-* `tests/test_columnpage.cpp`
-
-### Role
-
-* Represents an in-memory page of a fixed-size column.
-* Manages a fixed number of **slots** for `ValueType` values and a **tombstone** bitmap to track used vs. free slots.
-
-### Layout
-
-```text
-┌─────────────────────────────────────────┐
-│ Header (meta-data)                     │
-│ - pageID (uint16_t)                    │
-│ - capacity (uint16_t): number of slots │
-│ - count (uint16_t): used slots         │
-│ - nextFreePage (uint16_t): link for free-page list (unused here)
-└─────────────────────────────────────────┘
-│ Data arrays:                           │
-│ - ValueType values[capacity]           │
-│ - bool tombstone[capacity]             │
-└─────────────────────────────────────────┘
-```
-
-### API (in `ColumnPage.hpp`)
+Manages one column stream on disk. Holds `colType_` and `valueBytes_` (from MasterPage).
 
 ```cpp
-class ColumnPage {
+class ColumnFile {
 public:
-  ColumnPage(uint16_t pageID, uint16_t slotCount);
+    ColumnFile(const std::string& path, MasterPage& mp, uint16_t colIdx);
 
-  int16_t     findFreeSlot() const;
-  void        markUsed(int slotIdx);
-  void        markDeleted(int slotIdx);
-  ValueType   readValue(int slotIdx) const;
-  void        writeValue(int slotIdx, ValueType val);
+    // Typed API (Phase 2+)
+    uint32_t              allocTypedSlot(ColValue val);
+    std::optional<ColValue> fetchTypedSlot(uint32_t slotID) const;
 
-  uint16_t    pageID;
-  uint16_t    capacity;
-  uint16_t    count;
-  uint16_t    nextFreePage;
-  std::vector<ValueType> values;
-  std::vector<bool>       tombstone;
+    // Legacy uint32 API (wraps typed API)
+    uint32_t              allocSlot(ValueType val);
+    std::optional<ValueType> fetchSlot(uint32_t slotID) const;
+    void                  deleteSlot(uint32_t slotID);
+
+    // Zone-map access for range pruning
+    std::pair<ValueType,ValueType> zoneMap(uint16_t pageID);
+
+    static uint16_t pageIdFromSlotId(uint32_t slotID);   // slotID >> 16
+    ColType colType() const;
 };
 ```
 
-#### `findFreeSlot()`
-
-* Scans `tombstone[]` for a `false` entry, returns its index or `-1` if none.
-
-#### `markUsed(int slotIdx)`
-
-* Sets `tombstone[slotIdx] = true` and increments `count` if it was previously free.
-
-#### `markDeleted(int slotIdx)`
-
-* Sets `tombstone[slotIdx] = false` and decrements `count` if it was previously used.
-
-#### `readValue` / `writeValue`
-
-* Access or assign the `values[slotIdx]` without changing `count`.
-
-### Test: `test_columnpage.cpp`
-
-* Instantiates `ColumnPage(1, 8)`.
-* Asserts initial `count == 0` and all `tombstone` are false.
-* Allocates all 8 slots, writes values, and asserts `tombstone[i] == true`.
-* Deletes every second slot and asserts correct `count`.
-* Ensures freed slots are reused when calling `findFreeSlot()` again.
-* Prints **ColumnPage in-memory test passed!** on success.
+SlotID encoding: `(pageID << 16) | slotIndex`.
 
 ---
 
-## Next Steps
+## RowIndex
 
-1. **`ColumnFile` implementation**: connect `MasterPage` and `ColumnPage` for on-disk CRUD.
-2. **Unit tests for `ColumnFile`**: verify `allocSlot`, `fetchSlot`, and `deleteSlot`.
-3. **Documentation updates**: keep this markdown in sync as new classes and methods are added.
-4. **Integration with Metal kernels**: map column data into `MTLBuffer` and run compute shaders.
+**Files:** `src/RowIndex.hpp`, `src/RowIndex.cpp`
+
+Sidecar `.mdb.idx` file mapping `rowID → slotIDs[numColumns]`.
+
+```cpp
+class RowIndex {
+public:
+    RowIndex(const std::string& pathBase, uint16_t numColumns);
+    void openOrCreate(bool create = false);   // create=true truncates file
+
+    uint32_t appendRow(const std::vector<uint32_t>& slotIDs);
+    void     markDeleted(uint32_t rowID);
+    std::optional<std::vector<uint32_t>> fetch(uint32_t rowID) const;
+    void     forEachLive(std::function<void(uint32_t, const std::vector<uint32_t>&)>) const;
+
+    uint32_t rowsRecorded() const;
+    uint32_t liveRows() const;
+};
+```
 
 ---
 
-*Document last updated: July 8, 2025*
+## Table
+
+**Files:** `src/Table.hpp`, `src/Table.cpp`
+
+```cpp
+class Table {
+public:
+    // Constructors
+    Table(const std::string& path, uint16_t pageSize, uint16_t numColumns);  // all UINT32
+    Table(const std::string& path, uint16_t pageSize, const std::vector<ColType>&);
+    Table(const std::string& path);  // open existing
+
+    // Insert
+    uint32_t insertRow(const std::vector<ValueType>& values);
+    uint32_t insertTypedRow(const std::vector<ColValue>& values);
+
+    // Fetch
+    std::vector<std::optional<ValueType>> fetchRow(uint32_t rowID);
+    std::vector<std::optional<ColValue>>  fetchTypedRow(uint32_t rowID);
+
+    void deleteRow(uint32_t rowID);
+
+    // Aggregations
+    ValueType sumColumn(uint16_t colIdx);
+    ValueType sumColumnHybrid(uint16_t colIdx);   // GPU when large
+    ValueType minColumn(uint16_t colIdx);          // zone-map O(pages)
+    ValueType maxColumn(uint16_t colIdx);          // zone-map O(pages)
+
+    // Scans
+    std::vector<uint32_t> scanEquals(uint16_t colIdx, ValueType val);      // hybrid
+    std::vector<uint32_t> whereBetween(uint16_t colIdx, ValueType lo, ValueType hi);
+
+    // Materialize helpers (used by GroupBy / GPU dispatch)
+    std::vector<ValueType>  materializeColumn(uint16_t colIdx);
+    Materialized            materializeColumnWithRowIDs(uint16_t colIdx);  // {values, rowIDs}
+    std::vector<std::vector<ValueType>> projectRows(const std::vector<uint32_t>& rowIDs,
+                                                     const std::vector<uint16_t>& cols);
+
+    // GPU control
+    void setUseGPU(bool v);
+    void setGPUThreshold(size_t n);
+};
+```
+
+---
+
+## Engine
+
+**Files:** `src/Engine.hpp`, `src/Engine.cpp`
+
+Top-level facade. Owns a `std::unordered_map<std::string, Table>` registry.
+
+```cpp
+class Engine {
+public:
+    Table& createTable(const std::string& name, uint16_t numCols, uint16_t pageSize = 4096);
+    Table& createTypedTable(const std::string& name, const std::vector<ColType>&,
+                            uint16_t pageSize = 4096);
+    Table& openTable(const std::string& name);
+    Table& getTable(const std::string& name);
+
+    uint32_t insert(const std::string& name, const std::vector<ValueType>& row);
+    uint32_t insertTyped(const std::string& name, const std::vector<ColValue>& row);
+
+    std::vector<uint32_t> scanEquals(const std::string& name, uint16_t col, ValueType val);
+    std::vector<uint32_t> whereBetween(const std::string& name, uint16_t col,
+                                        ValueType lo, ValueType hi);
+
+    ValueType sumColumn(const std::string& name, uint16_t col);
+    ValueType minColumn(const std::string& name, uint16_t col);
+    ValueType maxColumn(const std::string& name, uint16_t col);
+
+    std::unordered_map<ValueType, uint64_t>  groupCount(const std::string& name, uint16_t keyCol);
+    std::unordered_map<ValueType, uint64_t>  groupSum  (const std::string& name, uint16_t keyCol,
+                                                         uint16_t valCol);
+    std::unordered_map<ValueType, double>    groupAvg  (const std::string& name, uint16_t keyCol,
+                                                         uint16_t valCol);
+    std::unordered_map<ValueType, ValueType> groupMin  (const std::string& name, uint16_t keyCol,
+                                                         uint16_t valCol);
+    std::unordered_map<ValueType, ValueType> groupMax  (const std::string& name, uint16_t keyCol,
+                                                         uint16_t valCol);
+
+    std::vector<std::pair<uint32_t,uint32_t>> join(const std::string& left,  uint16_t leftCol,
+                                                    const std::string& right, uint16_t rightCol);
+};
+```
+
+---
+
+## GroupBy
+
+**Files:** `src/GroupBy.hpp`, `src/GroupBy.cpp`
+
+Static methods. GPU path active when `useGPU=true`, `n >= gpuThreshold`, and `metalIsAvailable()`.
+
+```cpp
+namespace GroupBy {
+    std::unordered_map<ValueType, uint64_t>  countByKey(Table&, uint16_t keyCol,
+                                                          bool useGPU = true,
+                                                          size_t gpuThreshold = 4096);
+    std::unordered_map<ValueType, uint64_t>  sumByKey  (Table&, uint16_t keyCol,
+                                                          uint16_t valCol,
+                                                          bool useGPU = true,
+                                                          size_t gpuThreshold = 4096);
+    std::unordered_map<ValueType, double>    avgByKey  (Table&, uint16_t keyCol, uint16_t valCol);
+    std::unordered_map<ValueType, ValueType> minByKey  (Table&, uint16_t keyCol, uint16_t valCol);
+    std::unordered_map<ValueType, ValueType> maxByKey  (Table&, uint16_t keyCol, uint16_t valCol);
+}
+```
+
+**Note:** avg/min/max are CPU-only. GPU path for count/sum has known performance issues
+(see `PROGRESS.md` — shader compilation not cached).
+
+---
+
+## Join
+
+**Files:** `src/Join.hpp`, `src/Join.cpp`
+
+```cpp
+namespace Join {
+    // Hash join on equality of one column from each table.
+    // Returns pairs of (leftRowID, rightRowID).
+    std::vector<std::pair<uint32_t,uint32_t>>
+    hashJoinEq(Table& left, uint16_t leftCol, Table& right, uint16_t rightCol);
+}
+```
+
+---
+
+## GPU Kernels
+
+| File | Kernel | Dispatch | Notes |
+|------|--------|----------|-------|
+| `gpu_scan_equals.mm` | `scan_equals` | 1D grid over n values | Returns matching rowIDs |
+| `gpu_scan_range.mm`  | `scan_between` | 1D grid over n values | lo ≤ v ≤ hi |
+| `gpu_sum.mm`         | `reduce_sum_pass1/2` | Two-pass tree reduction | 64-bit accumulator in pass 2 |
+| `gpu_groupby.mm`     | `group_by` | 1D grid over n rows | Single-pass device-atomic hash table; **pipeline not cached — slow on first call** |
+
+All kernels: UINT32 inputs only. Falls back to CPU for other ColTypes.
+Pipeline state objects are created per-call (not cached) — see `PROGRESS.md` for fix plan.
+
+---
+
+## Build
+
+```bash
+# From src/ directory
+make              # build all test binaries
+make run          # build + run all tests
+make fast TEST=test_groupby   # build + run one test
+make clean        # remove binaries, .o, .mdb, .mdb.idx
+```
+
+Test binaries: `test_engine`, `test_groupby`, `test_gpu_scan_equals`, `test_gpu_sum`,
+`test_scan_hybrid`, `test_persist_pages`, `test_where_range`, `test_join`, `test_types`.
