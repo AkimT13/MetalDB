@@ -5,6 +5,7 @@
 #include <optional>
 #include <cstdint>
 #include <utility>
+#include <unordered_map>
 #include "MasterPage.hpp"
 #include "ValueTypes.hpp"
 #include "Column.hpp"
@@ -55,12 +56,19 @@ private:
     ColType  colType_;  // type tag for this column
     uint16_t valueBytes_; // bytes per slot: 4 or 8
 
+    // In-memory page cache: avoids re-reading pages from disk on every fetchSlot
+    mutable std::unordered_map<uint16_t, ColumnPage> pageCache_;
+
     // Load or create a page with free slots; returns its pageID
     uint16_t allocateOrFetchPage();
 
-    // Read / write a typed page
-    ColumnPage loadPage(uint16_t pageID);
+    // Read / write a typed page (loadPage populates pageCache_)
+    ColumnPage loadPage(uint16_t pageID) const;
     void flushPage(const ColumnPage &page);
+
+    // Ensure a page is in the cache and return a reference to it (no copy).
+    // Only safe while no mutation of pageCache_ occurs.
+    const ColumnPage& pageRef(uint16_t pageID) const;
 
     // Helpers to get/set the head of our free-page list
     uint16_t headPageID() const { return mp_.headPageIDs[colIdx_]; }

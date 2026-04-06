@@ -98,7 +98,12 @@ uint16_t ColumnFile::allocateOrFetchPage() {
     return pid;
 }
 
-ColumnPage ColumnFile::loadPage(uint16_t pageID) {
+ColumnPage ColumnFile::loadPage(uint16_t pageID) const {
+    // Cache hit — return a copy of the cached page
+    auto it = pageCache_.find(pageID);
+    if (it != pageCache_.end()) return it->second;
+
+    // Cache miss — read from disk
     const off_t base = off_t(pageID) * off_t(pageSize_);
 
     DiskPageHeader hdr{};
@@ -108,6 +113,7 @@ ColumnPage ColumnFile::loadPage(uint16_t pageID) {
         ColumnPage page(pageID, cap, valueBytes_);
         page.count = 0;
         page.nextFreePage = UINT16_MAX;
+        pageCache_.emplace(pageID, page);
         return page;
     }
 
@@ -118,7 +124,6 @@ ColumnPage ColumnFile::loadPage(uint16_t pageID) {
     page.count        = (hdr.count > cap) ? cap : hdr.count;
     page.nextFreePage = hdr.nextFreePage;
 
-    // Read raw values
     const size_t valuesBytes = size_t(cap) * valueBytes_;
     const off_t  valuesOff   = base + sizeof(DiskPageHeader);
     if (valuesBytes) {
@@ -127,7 +132,6 @@ ColumnPage ColumnFile::loadPage(uint16_t pageID) {
             std::perror("ColumnFile::loadPage pread(values)");
     }
 
-    // Read tombstones
     const size_t tombBytes = size_t(cap);
     const off_t  tombOff   = valuesOff + off_t(valuesBytes);
     if (tombBytes) {
@@ -138,15 +142,15 @@ ColumnPage ColumnFile::loadPage(uint16_t pageID) {
             page.tombstone[i] = (tmp[i] != 0);
     }
 
-    // Zone map (legacy 32-bit)
-    page.minValue = static_cast<ValueType>(hdr.minValue);
-    page.maxValue = static_cast<ValueType>(hdr.maxValue);
+    page.minValue   = static_cast<ValueType>(hdr.minValue);
+    page.maxValue   = static_cast<ValueType>(hdr.maxValue);
     page.minValue64 = static_cast<int64_t>(hdr.minValue);
     page.maxValue64 = static_cast<int64_t>(hdr.maxValue);
 
     if (page.count == 0 || page.minValue > page.maxValue)
         page.recomputeMinMax();
 
+    pageCache_.emplace(pageID, page);
     return page;
 }
 
@@ -188,6 +192,9 @@ void ColumnFile::flushPage(const ColumnPage &page) {
     }
 
     fsync(fd_);
+
+    // Keep the in-memory cache in sync with what was just written
+    pageCache_.insert_or_assign(page.pageID, page);
 }
 
 // ── Legacy UINT32 API ────────────────────────────────────────────────────────
@@ -229,11 +236,17 @@ uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
     return (uint32_t(pid) << 16) | uint32_t(slot);
 }
 
+const ColumnPage& ColumnFile::pageRef(uint16_t pid) const {
+    auto it = pageCache_.find(pid);
+    if (it != pageCache_.end()) return it->second;
+    loadPage(pid); // populates pageCache_
+    return pageCache_.at(pid);
+}
+
 std::optional<ColValue> ColumnFile::fetchTypedSlot(uint32_t id) const {
     const uint16_t pid  = pageIdFromSlotId(id);
     const uint16_t slot = slotIdxFromSlotId(id);
-    // Cast away const to reuse loadPage (reads disk, doesn't mutate state)
-    ColumnPage page = const_cast<ColumnFile*>(this)->loadPage(pid);
+    const ColumnPage& page = pageRef(pid);  // no copy — reference into cache
     if (slot >= page.capacity) return std::nullopt;
     if (!page.tombstone[slot]) return std::nullopt;
 
