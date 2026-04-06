@@ -2,6 +2,10 @@
 *.o
 *.d
 
+# Metal intermediate and precompiled library files
+*.air
+*.metallib
+
 # Test and scratch binaries (no extension on macOS)
 a.out
 main

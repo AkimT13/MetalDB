@@ -2,8 +2,21 @@ CXX      := clang++
 CXXFLAGS := -std=c++17 -arch arm64 -I/usr/local/share/metal-cpp -g -MMD -MP
 LDFLAGS  := -framework Metal -framework Foundation
 
+# Metal shader compilation
+METAL_SDK   := macosx
+METAL_FLAGS := -std=metal3.0
+
+METAL_SRCS    := gpu_scan_equals.metal gpu_scan_range.metal gpu_sum.metal gpu_groupby.metal
+METALLIB_SRCS := $(METAL_SRCS:.metal=.metallib)
+
+%.air: %.metal
+	xcrun -sdk $(METAL_SDK) metal $(METAL_FLAGS) -c $< -o $@
+
+%.metallib: %.air
+	xcrun -sdk $(METAL_SDK) metallib $< -o $@
+
 # Core sources (both .cpp and .mm)
-SRCS := MasterPage.cpp Column.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
+SRCS := MasterPage.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
         gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm \
         Engine.cpp GroupBy.cpp Join.cpp
 
@@ -16,7 +29,7 @@ DEPS := $(OBJS:.o=.d)
 TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
          test_engine test_groupby test_join test_types
 
-all: $(TESTS)
+all: $(METALLIB_SRCS) $(TESTS)
 
 # Compile rules
 %.o: %.mm
@@ -93,7 +106,8 @@ fast: $(TESTS)
 
 clean:
 	rm -f $(OBJS) $(DEPS) $(TESTS) mdb mdb.o
-	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx *.mdb *.mdb.idx
+	rm -f $(METALLIB_SRCS) $(METAL_SRCS:.metal=.air)
+	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx *.mdb *.mdb.idx *.str
 
 # Include dependency files (safe if missing)
 -include $(DEPS)

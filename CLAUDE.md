@@ -70,3 +70,35 @@ docs.md                  — component-level API documentation
 ```
 
 Metal-cpp headers are expected at `/usr/local/share/metal-cpp` (system install) or the local `metal-cpp/` directory. The build uses `-I/usr/local/share/metal-cpp`.
+
+## GPU String Operations — Design Reference
+
+### String Storage Layout
+Each STRING column stores (offset:u32, length:u32) pairs in the normal column page.
+Raw UTF-8 bytes live in a companion heap file: {table}.mdb.{colIdx}.str
+
+### Arrow-style GPU Buffer Layout
+When uploading strings to GPU, pack them into two MTLBuffers:
+- chars buffer: contiguous UTF-8 bytes, all strings concatenated
+- offsets buffer: int32_t array where offsets[i] = byte start of string i,
+  offsets[n] = total chars bytes (n+1 elements total)
+- string i = chars[offsets[i] .. offsets[i+1]]
+
+### GPU String Kernel Rules
+1. NEVER use dynamic allocation inside a Metal shader (no malloc equivalent).
+   Always pre-allocate output buffers on the CPU before kernel launch.
+2. For equality scans: one thread per row, compare chars slice against needle,
+   write 1/0 to a uint32 results buffer.
+3. For output-size-varying operations (transforms, normalization):
+   use two-pass pattern — sizes kernel first, exclusive_scan on CPU,
+   then populate kernel. Never assume output size == input size.
+4. Needle/pattern goes in a small separate MTLBuffer, not a kernel constant,
+   to avoid MSL constant buffer size limits on long strings.
+5. GPU string path only activates when n >= GPU_STRING_THRESHOLD (tune empirically,
+   start at 50000 rows). CPU fallback must always exist.
+
+### Known Constraints
+- Metal does not support atomic_ulong on device memory (use atomic_uint, watch overflow)
+- GPU kernels currently only support UINT32; other ColTypes fall back to CPU
+- STRING heap has no compaction; deleted bytes are orphaned
+- materializeColumnWithRowIDs is the current hot path bottleneck (~18ms/call)

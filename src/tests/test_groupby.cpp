@@ -62,19 +62,28 @@ int main() {
         std::printf("  totalCPU=%llu  (expect %u)\n", (unsigned long long)totalCPU, N);
         assert(totalCPU == N);
 
-        // GPU path (falls back to CPU transparently if Metal unavailable)
+        // GPU path — measure cold (first call, warms pipeline cache) and hot (cached)
         auto t0 = std::chrono::steady_clock::now();
         auto gpuCnt = GroupBy::countByKey(t, 0, /*useGPU=*/true, /*threshold=*/0);
         auto gpuSum = GroupBy::sumByKey(t, 0, 1, /*useGPU=*/true, /*threshold=*/0);
         auto t1 = std::chrono::steady_clock::now();
-        double ms = std::chrono::duration<double,std::milli>(t1-t0).count();
+        double msCold = std::chrono::duration<double,std::milli>(t1-t0).count();
 
         // Results must match CPU
         assert(gpuCnt.size() == cpuCnt.size());
         for (auto& [k,v] : cpuCnt) assert(gpuCnt.count(k) && gpuCnt[k] == v);
         for (auto& [k,v] : cpuSum) assert(gpuSum.count(k) && gpuSum[k] == v);
 
-        std::printf("  GPU group-by (%u rows, %u keys): %.2f ms\n", N, KEYS, ms);
+        // Hot call — pipeline already cached
+        auto t2 = std::chrono::steady_clock::now();
+        auto gpuCnt2 = GroupBy::countByKey(t, 0, /*useGPU=*/true, /*threshold=*/0);
+        auto gpuSum2 = GroupBy::sumByKey(t, 0, 1, /*useGPU=*/true, /*threshold=*/0);
+        auto t3 = std::chrono::steady_clock::now();
+        double msHot = std::chrono::duration<double,std::milli>(t3-t2).count();
+        (void)gpuCnt2; (void)gpuSum2;
+
+        std::printf("  GPU group-by (%u rows, %u keys): cold=%.2f ms  hot=%.2f ms\n",
+                    N, KEYS, msCold, msHot);
 
         std::remove("gb_large.mdb");
         std::remove("gb_large.mdb.idx");
