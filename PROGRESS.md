@@ -60,36 +60,55 @@ Tests: `test_groupby` passes (correctness verified, CPU and GPU results agree).
 
 ## Known Issues / Next Work
 
-### GPU Group By Performance (HIGH PRIORITY)
+### GPU Group By Performance
 
-The current GPU group-by path is **slower than CPU** for all practical inputs. Measured
-~10 seconds for 100k rows vs. sub-millisecond on CPU. Root causes:
+The GPU group-by path has been substantially improved. Measured on `test_groupby`
+(100k rows, 10 distinct keys):
 
-1. **Runtime shader compilation per call** — `newLibraryWithSource` recompiles the Metal
-   kernel string on every `gpuGroupByCountSum` invocation (~8–9s overhead). Fix: compile
-   once at startup and cache the `ComputePipelineState` in a singleton context struct.
+| State | Cold | Hot |
+|-------|------|-----|
+| Before fixes | ~10s | ~10s |
+| After fixes (a) + (b) + (c) | ~105ms | ~58ms |
 
-2. **Device and CommandQueue created per call** — `CreateSystemDefaultDevice()` and
-   `newCommandQueue()` are called inside `gpuGroupByCountSum`. Fix: add to the same
-   singleton.
+Root causes and fixes applied:
 
-3. **High atomic contention for low-cardinality group-by** — with 10 distinct keys and
-   100k threads, ~10k threads race on each of 10 buckets. Fix: switch to a two-level
-   reduction — each threadgroup builds a private partial table in threadgroup memory, then
-   a second pass merges partial tables into the global result.
+**a) GpuGroupByContext singleton — DONE**
+`MTL::Device`, `MTL::CommandQueue`, and `MTL::ComputePipelineState` are now cached on
+first use. Metal shaders are pre-compiled to `.metallib` at build time. Previously
+`newLibraryWithSource` recompiled the kernel string on every call (~8–9s overhead).
 
-4. **Data size too small for GPU to win** — 100k × 4 bytes = 400 KB. GPU overhead
-   doesn't amortize until data is in the tens of MB (~1–5M rows with cached pipeline).
+**b) Two-level threadgroup reduction kernel — DONE**
+Replaced the single-pass global-atomic kernel in `src/gpu_groupby.metal` with a
+two-level reduction:
+- Phase 1: each threadgroup initializes a private 256-slot hash table in threadgroup
+  memory (~12 KB).
+- Phase 2: threads insert into the threadgroup-local table (low contention); falls back
+  to direct global insert on overflow (high-cardinality edge case).
+- Phase 3: one barrier, then each thread merges its slice of the threadgroup table into
+  the global table.
 
-**Recommended fix sequence:**
-```
-a) Add GpuGroupByContext singleton (Device + Queue + PSO cached on first use)
-b) Implement two-level threadgroup-local reduction kernel
-c) Raise default gpuThreshold to 1_000_000 until (a) is done
-```
+For 100k rows / 10 keys this reduces global atomic operations from ~100k to ~3.9k.
 
-After (a), expected overhead drops from ~10s to ~1ms, making GPU competitive at scale.
-After (b), GPU wins at ~500k+ rows for moderate cardinality (100–10k distinct keys).
+**c) ColumnPage copy elimination — DONE**
+Added `ColumnFile::pageRef(uint16_t pid) const` returning `const ColumnPage&` into the
+in-memory cache. `fetchTypedSlot` now uses this reference instead of returning a full
+`ColumnPage` copy. Previously each per-slot fetch allocated and copied a ~4 KB page;
+with 100k rows this produced ~400 MB of heap churn (~1.8s per materialize call).
+Fixed in `src/ColumnFile.hpp` and `src/ColumnFile.cpp`.
+
+### Remaining Bottleneck: materializeColumnWithRowIDs (NEXT PRIORITY)
+
+The hot path at 58ms is now dominated by `materializeColumnWithRowIDs` (~18ms per call,
+3 calls × 18ms = 54ms). The GPU kernel itself runs in <2ms once data is loaded.
+
+Root cause: the current implementation iterates the row index and calls `fetchTypedSlot`
+per slot, which does a hash-map lookup into the page cache on every row.
+
+**Next fix — Page-scan materialization optimization:**
+Instead of row-index iteration + per-slot `fetchTypedSlot`, scan pages directly in
+sequential order and copy contiguous value arrays in bulk. Expected improvement:
+~18ms → ~2ms per call (~10x speedup for materialization), which would bring the
+100k-row hot path from ~58ms to ~10ms or less.
 
 ### 32-bit Sum Overflow in GPU Path
 `bucketSums` uses `device atomic_uint` (32-bit). Per-group sums overflow if they exceed
@@ -99,7 +118,7 @@ non-atomic reduction pass for sums.
 
 ### Deferred: String Column Support
 Variable-length storage requires a separate heap file and indirection pointers.
-Not started. Recommend doing this after GPU performance is fixed.
+Not started. Recommend doing this after GPU performance work is complete.
 
 ### Deferred: GPU Kernels for INT64 / FLOAT / DOUBLE
 Current GPU paths (scan_equals, scan_range, sum, group_by) operate on UINT32 only.
