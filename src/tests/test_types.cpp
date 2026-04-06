@@ -50,6 +50,58 @@ int main() {
 
     std::remove("typed_tbl.mdb");
     std::remove("typed_tbl.mdb.idx");
+
+    // ── STRING column: insert, fetch, scan, persist ───────────────────────────
+    {
+        Engine e;
+        e.createTypedTable("str_tbl", {ColType::STRING, ColType::UINT32});
+
+        const char* names[] = {"alice", "bob", "charlie", "alice", "dave"};
+        uint32_t    scores[] = {90, 85, 92, 78, 88};
+        for (int i = 0; i < 5; ++i)
+            e.insertTyped("str_tbl", {ColValue(std::string(names[i])), ColValue(scores[i])});
+
+        // Fetch and verify string values
+        auto& t = e.openTable("str_tbl");
+        for (int i = 0; i < 5; ++i) {
+            auto row = t.fetchTypedRow(i);
+            assert(row.size() == 2);
+            assert(row[0].has_value() && row[0]->type == ColType::STRING);
+            assert(row[0]->str == names[i]);
+            assert(row[1].has_value() && row[1]->u32 == scores[i]);
+        }
+
+        // Scan: "alice" should match rowIDs 0 and 3
+        auto hits = e.whereEqString("str_tbl", 0, "alice");
+        assert(hits.size() == 2);
+        bool has0 = false, has3 = false;
+        for (auto rid : hits) { if (rid == 0) has0 = true; if (rid == 3) has3 = true; }
+        assert(has0 && has3);
+
+        // Scan: "bob" matches rowID 1 only
+        auto bobHits = e.whereEqString("str_tbl", 0, "bob");
+        assert(bobHits.size() == 1 && bobHits[0] == 1);
+
+        // Scan: "nobody" matches nothing
+        assert(e.whereEqString("str_tbl", 0, "nobody").empty());
+    }
+
+    // Persist: re-open and verify strings survive
+    {
+        Engine e2;
+        auto& t2 = e2.openTable("str_tbl");
+        auto row = t2.fetchTypedRow(2);
+        assert(row[0].has_value() && row[0]->str == "charlie");
+        assert(row[1].has_value() && row[1]->u32 == 92u);
+
+        auto hits = e2.whereEqString("str_tbl", 0, "alice");
+        assert(hits.size() == 2);
+    }
+
+    std::remove("str_tbl.mdb");
+    std::remove("str_tbl.mdb.idx");
+    std::remove("str_tbl.mdb.0.str");
+
     std::puts("test_types: passed");
     return 0;
 }

@@ -72,10 +72,17 @@ ColumnFile::ColumnFile(const std::string &path, MasterPage &mp, uint16_t colIdx)
 
     fd_ = open(path.c_str(), O_RDWR | O_CREAT, 0666);
     assert(fd_ >= 0);
+
+    if (colType_ == ColType::STRING) {
+        heapPath_ = path + "." + std::to_string(colIdx_) + ".str";
+        heapFd_ = open(heapPath_.c_str(), O_RDWR | O_CREAT, 0666);
+        assert(heapFd_ >= 0);
+    }
 }
 
 ColumnFile::~ColumnFile() {
     if (fd_ >= 0) close(fd_);
+    if (heapFd_ >= 0) close(heapFd_);
 }
 
 uint16_t ColumnFile::allocateOrFetchPage() {
@@ -225,6 +232,17 @@ uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
         case ColType::INT64:  { int64_t  v = val.i64;            page.writeRaw(slot, &v, 8); break; }
         case ColType::FLOAT:  { float    v = val.f32;            page.writeRaw(slot, &v, 4); break; }
         case ColType::DOUBLE: { double   v = val.f64;            page.writeRaw(slot, &v, 8); break; }
+        case ColType::STRING: {
+            off_t end = lseek(heapFd_, 0, SEEK_END);
+            uint32_t heapOff = static_cast<uint32_t>(end);
+            uint32_t len     = static_cast<uint32_t>(val.str.size());
+            if (len > 0)
+                pwrite(heapFd_, val.str.data(), len, end);
+            fsync(heapFd_);
+            uint32_t pair[2] = { heapOff, len };
+            page.writeRaw(slot, pair, 8);
+            break;
+        }
     }
     page.markUsed(slot);
 
@@ -255,6 +273,15 @@ std::optional<ColValue> ColumnFile::fetchTypedSlot(uint32_t id) const {
         case ColType::INT64:  { int64_t  v; page.readRaw(slot, &v, 8); return ColValue(v); }
         case ColType::FLOAT:  { float    v; page.readRaw(slot, &v, 4); return ColValue(v); }
         case ColType::DOUBLE: { double   v; page.readRaw(slot, &v, 8); return ColValue(v); }
+        case ColType::STRING: {
+            uint32_t pair[2] = {0, 0};
+            page.readRaw(slot, pair, 8);
+            uint32_t off = pair[0], len = pair[1];
+            std::string s(len, '\0');
+            if (len > 0)
+                pread(heapFd_, s.data(), len, off);
+            return ColValue(std::move(s));
+        }
     }
     return std::nullopt;
 }
@@ -265,6 +292,7 @@ void ColumnFile::deleteSlot(uint32_t id) {
     ColumnPage page = loadPage(pid);
     if (slot >= page.capacity) return;
 
+    // For STRING columns the heap bytes are orphaned on deletion (no compaction).
     const bool wasFull = (page.count == page.capacity);
     if (page.tombstone[slot]) page.markDeleted(slot);
 

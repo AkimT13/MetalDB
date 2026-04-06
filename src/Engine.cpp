@@ -41,6 +41,10 @@ std::vector<uint32_t> Engine::whereEq(const std::string& name, uint16_t col, Val
     return openTable(name).scanEquals(col, v);
 }
 
+std::vector<uint32_t> Engine::whereEqString(const std::string& name, uint16_t col, const std::string& needle) {
+    return openTable(name).scanEqualsString(col, needle);
+}
+
 std::vector<uint32_t> Engine::whereBetween(const std::string& name, uint16_t col, ValueType lo, ValueType hi) {
     return openTable(name).whereBetween(col, lo, hi);
 }

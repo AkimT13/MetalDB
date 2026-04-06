@@ -18,6 +18,7 @@ public:
     uint32_t insert(const std::string& name, const std::vector<ValueType>& row);
     uint32_t insertTyped(const std::string& name, const std::vector<ColValue>& row);
     std::vector<uint32_t> whereEq(const std::string& name, uint16_t col, ValueType v);
+    std::vector<uint32_t> whereEqString(const std::string& name, uint16_t col, const std::string& needle);
     std::vector<uint32_t> whereBetween(const std::string& name, uint16_t col, ValueType lo, ValueType hi);
     ValueType sum(const std::string& name, uint16_t col);
     ValueType minColumn(const std::string& name, uint16_t col);

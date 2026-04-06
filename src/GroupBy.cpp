@@ -37,6 +37,8 @@ static void cpuCountSumByKey(Table& t, uint16_t keyCol, uint16_t valCol,
 
 std::unordered_map<ValueType, uint64_t>
 GroupBy::countByKey(Table& t, uint16_t keyCol, bool useGPU, size_t gpuThreshold) {
+    if (t.columnFile(keyCol).colType() == ColType::STRING) useGPU = false;
+
     // Materialize key column to decide GPU vs CPU and obtain data.
     auto m = t.materializeColumnWithRowIDs(keyCol);
     const size_t n = m.values.size();
@@ -56,6 +58,9 @@ GroupBy::countByKey(Table& t, uint16_t keyCol, bool useGPU, size_t gpuThreshold)
 std::unordered_map<ValueType, uint64_t>
 GroupBy::sumByKey(Table& t, uint16_t keyCol, uint16_t valCol,
                   bool useGPU, size_t gpuThreshold) {
+    if (t.columnFile(keyCol).colType() == ColType::STRING ||
+        t.columnFile(valCol).colType() == ColType::STRING) useGPU = false;
+
     auto mk = t.materializeColumnWithRowIDs(keyCol);
     const size_t n = mk.values.size();
 

@@ -276,6 +276,17 @@ ValueType Table::maxColumn(uint16_t colIdx) {
     return result;
 }
 
+std::vector<uint32_t> Table::scanEqualsString(uint16_t colIdx, const std::string& needle) {
+    assert(colIdx < cols_.size());
+    std::vector<uint32_t> rowIDs;
+    rowIndex_.forEachLive([&](uint32_t rowID, const std::vector<uint32_t>& slots) {
+        auto cv = cols_[colIdx].fetchTypedSlot(slots[colIdx]);
+        if (cv && cv->type == ColType::STRING && cv->str == needle)
+            rowIDs.push_back(rowID);
+    });
+    return rowIDs;
+}
+
 // gpu_sum host entry
 uint64_t gpuSumU32(const std::vector<uint32_t>& values);
 

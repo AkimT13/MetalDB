@@ -43,6 +43,9 @@ public:
     // Hybrid scan (CPU for small / no-GPU; GPU for large)
     std::vector<uint32_t> scanEquals(uint16_t colIdx, ValueType val);
 
+    // CPU-only string equality scan (STRING columns only)
+    std::vector<uint32_t> scanEqualsString(uint16_t colIdx, const std::string& needle);
+
     // CPU-only sum (you already had this)
     ValueType sumColumn(uint16_t colIdx);
 

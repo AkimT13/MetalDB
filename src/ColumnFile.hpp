@@ -50,6 +50,8 @@ public:
 
 private:
     int fd_;            // OS file descriptor for this column file
+    int heapFd_ = -1;  // heap file for STRING columns (-1 if not STRING)
+    std::string heapPath_;  // path to heap file (empty if not STRING)
     MasterPage &mp_;    // reference to the page-0 metadata
     uint16_t colIdx_;   // which column (0 <= colIdx_ < mp_.numColumns)
     uint16_t pageSize_; // copy of mp_.pageSize for convenience
