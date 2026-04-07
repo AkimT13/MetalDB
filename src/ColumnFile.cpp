@@ -306,3 +306,39 @@ void ColumnFile::deleteSlot(uint32_t id) {
 void ColumnFile::flushMaster() {
     mp_.flush(fd_);
 }
+
+void ColumnFile::packStringsForGPU(const std::vector<uint32_t>& slotIDs,
+                                    std::vector<char>&            outChars,
+                                    std::vector<int32_t>&         outOffsets) const
+{
+    assert(colType_ == ColType::STRING);
+    const size_t n = slotIDs.size();
+
+    // Read the entire heap file in one shot to avoid per-string pread syscalls.
+    off_t heapSize = (heapFd_ >= 0) ? lseek(heapFd_, 0, SEEK_END) : 0;
+    std::vector<char> heap(heapSize > 0 ? heapSize : 0);
+    if (heapSize > 0)
+        pread(heapFd_, heap.data(), static_cast<size_t>(heapSize), 0);
+
+    outChars.clear();
+    outOffsets.resize(n + 1);
+    int32_t cursor = 0;
+    outOffsets[0] = 0;
+
+    for (size_t i = 0; i < n; ++i) {
+        const uint16_t pid  = pageIdFromSlotId(slotIDs[i]);
+        const uint16_t slot = slotIdxFromSlotId(slotIDs[i]);
+        const ColumnPage& page = pageRef(pid);
+
+        uint32_t pair[2] = {0, 0};
+        page.readRaw(slot, pair, 8);
+        const uint32_t off = pair[0];
+        const uint32_t len = pair[1];
+
+        if (len > 0 && off + len <= static_cast<uint32_t>(heap.size()))
+            outChars.insert(outChars.end(), heap.data() + off, heap.data() + off + len);
+
+        cursor += static_cast<int32_t>(len);
+        outOffsets[i + 1] = cursor;
+    }
+}

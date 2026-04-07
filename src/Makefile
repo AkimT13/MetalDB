@@ -6,7 +6,7 @@ LDFLAGS  := -framework Metal -framework Foundation
 METAL_SDK   := macosx
 METAL_FLAGS := -std=metal3.0
 
-METAL_SRCS    := gpu_scan_equals.metal gpu_scan_range.metal gpu_sum.metal gpu_groupby.metal
+METAL_SRCS    := gpu_scan_equals.metal gpu_scan_range.metal gpu_sum.metal gpu_groupby.metal gpu_string_scan.metal
 METALLIB_SRCS := $(METAL_SRCS:.metal=.metallib)
 
 %.air: %.metal
@@ -17,7 +17,7 @@ METALLIB_SRCS := $(METAL_SRCS:.metal=.metallib)
 
 # Core sources (both .cpp and .mm)
 SRCS := MasterPage.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
-        gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm \
+        gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm gpu_string_scan.mm \
         Engine.cpp GroupBy.cpp Join.cpp
 
 # Object files (+ auto-generated dependency files)
@@ -27,7 +27,7 @@ DEPS := $(OBJS:.o=.d)
 
 # Tests
 TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
-         test_engine test_groupby test_join test_types
+         test_engine test_groupby test_join test_types test_string_gpu
 
 all: $(METALLIB_SRCS) $(TESTS)
 
@@ -85,6 +85,9 @@ test_join: $(OBJS) tests/test_join.cpp
 test_types: $(OBJS) tests/test_types.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+test_string_gpu: $(OBJS) tests/test_string_gpu.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 .PHONY: run clean fast
 
 # Run the full suite
@@ -98,6 +101,7 @@ run: all
 	./test_groupby
 	./test_join
 	./test_types
+	./test_string_gpu
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)

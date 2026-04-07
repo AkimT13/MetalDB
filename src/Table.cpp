@@ -1,6 +1,7 @@
 // Table.cpp
 #include "Table.hpp"
-#include "ColumnFile.hpp"  
+#include "ColumnFile.hpp"
+#include "gpu_string_scan.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <cassert>
@@ -278,6 +279,29 @@ ValueType Table::maxColumn(uint16_t colIdx) {
 
 std::vector<uint32_t> Table::scanEqualsString(uint16_t colIdx, const std::string& needle) {
     assert(colIdx < cols_.size());
+
+    const size_t n = rowIndex_.liveRows();
+
+    // GPU path: pack strings into Arrow layout and dispatch kernel.
+    if (useGPU_ && n >= gpuThreshold_ && metalIsAvailable()) {
+        std::vector<uint32_t> slotIDs, liveRowIDs;
+        slotIDs.reserve(n); liveRowIDs.reserve(n);
+        rowIndex_.forEachLive([&](uint32_t rowID, const std::vector<uint32_t>& slots) {
+            slotIDs.push_back(slots[colIdx]);
+            liveRowIDs.push_back(rowID);
+        });
+
+        std::vector<char>     chars;
+        std::vector<int32_t>  offsets;
+        cols_[colIdx].packStringsForGPU(slotIDs, chars, offsets);
+
+        std::vector<uint32_t> gpuResult;
+        if (gpuStringScanEquals(chars, offsets, liveRowIDs, needle, gpuResult))
+            return gpuResult;
+        // GPU pipeline failed — fall through to CPU.
+    }
+
+    // CPU fallback
     std::vector<uint32_t> rowIDs;
     rowIndex_.forEachLive([&](uint32_t rowID, const std::vector<uint32_t>& slots) {
         auto cv = cols_[colIdx].fetchTypedSlot(slots[colIdx]);

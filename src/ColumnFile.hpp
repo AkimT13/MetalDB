@@ -44,6 +44,14 @@ public:
 
     ColType colType() const { return colType_; }
 
+    // For STRING columns: pack live-row strings into Arrow-style GPU layout.
+    // slotIDs: one slotID per live row for this column (in rowIndex iteration order).
+    // outChars: concatenated UTF-8 bytes of all strings.
+    // outOffsets: n+1 int32_t offsets; string i = chars[offsets[i]..offsets[i+1]].
+    void packStringsForGPU(const std::vector<uint32_t>& slotIDs,
+                           std::vector<char>&            outChars,
+                           std::vector<int32_t>&         outOffsets) const;
+
     // Decode composite slotID
     static inline uint16_t pageIdFromSlotId(uint32_t id) { return uint16_t(id >> 16); }
     static inline uint16_t slotIdxFromSlotId(uint32_t id) { return uint16_t(id & 0xFFFF); }
