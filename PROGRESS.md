@@ -93,30 +93,56 @@ until the API surface stabilizes.
 
 ---
 
+### Phase 5 — Mini-SQL v1 CLI Query Surface (complete, intentionally small)
+Added a one-shot query path to `mdb`:
+
+- `mdb query "<sql>"`
+
+The new mini-SQL layer is implemented in `src/MiniSQL.cpp` and routes directly into the
+current engine rather than introducing a planner. Supported v1 features:
+
+- `SELECT <cols>` and `SELECT *`
+- `FROM '<table-base-path>'`
+- flat `WHERE` with all-`AND` or all-`OR`
+- numeric `=` and `BETWEEN`
+- string equality
+- scalar `COUNT(*)`, `SUM`, `MIN`, `MAX`, `AVG`
+- `GROUP BY cN` with exactly one aggregate expression
+
+Intentional v1 restrictions:
+
+- synthetic column identifiers only (`c0`, `c1`, ...)
+- mixed `AND` / `OR` in a single `WHERE` is rejected
+- no joins, aliases, `ORDER BY`, `LIMIT`, parentheses, subqueries, or CTEs
+- `GROUP BY ... WHERE ...` is rejected for now
+- grouped queries are limited to the existing UINT32 group-by paths
+
+Result printing is tab-separated with a header row. Missing tables now fail cleanly in
+the query path instead of creating typo files through `Engine::openTable()`.
+
+Coverage:
+
+- parser / executor / aggregate / group-by tests in `test_mini_sql`
+- one end-to-end `./mdb query ...` assertion in the same test
+
+Verified:
+
+- `make -C src fast TEST=test_mini_sql`
+- `make -C src test-python`
+- `make -C src run`
+
+---
+
 ## Known Issues / Next Work
 
-### Next Logical Usability Step — Mini-SQL / CLI Query Surface
+### Next Logical Usability Step — REPL Polish Or Server Mode
 
-With the C API and internal Python bindings now working, the next logical usability step is
-a small query-language layer rather than more binding work. The roadmap ordering now points to:
+The one-shot mini-SQL query surface is now in place. The next usability decision is whether to:
 
-`C API -> Python bindings -> mini-SQL -> networking`
+- add an interactive REPL on top of `mdb query` for local exploration, or
+- move up the roadmap to server mode now that a query language exists
 
-Why this is next:
-
-- It turns existing engine operations into a human-usable interface without requiring C++ or Python code.
-- It exercises the current feature set end-to-end: projection, compound `WHERE`, `GROUP BY`, and join.
-- It creates the minimal substrate needed before any future server mode is useful.
-
-Recommended scope for the first increment:
-
-- `SELECT <cols> FROM <table>`
-- `WHERE` with flat `AND` / `OR`
-- `GROUP BY`
-- simple aggregates already present in the engine
-- no subqueries, no CTEs, no planner work
-
-Keep it small and route directly into existing engine operations.
+The engine substrate no longer blocks either direction.
 
 ### GPU Group By Performance
 

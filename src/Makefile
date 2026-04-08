@@ -19,7 +19,7 @@ METALLIB_SRCS := $(METAL_SRCS:.metal=.metallib)
 # Core sources (both .cpp and .mm)
 SRCS := MasterPage.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
         gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm gpu_string_scan.mm \
-        Engine.cpp GroupBy.cpp Join.cpp mdb_c.cpp
+        Engine.cpp GroupBy.cpp Join.cpp MiniSQL.cpp mdb_c.cpp
 
 # Object files (+ auto-generated dependency files)
 OBJS := $(SRCS:.cpp=.o)
@@ -29,7 +29,7 @@ DEPS := $(OBJS:.o=.d)
 # Tests
 TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
          test_engine test_groupby test_join test_types test_string_gpu test_compound_where \
-         test_c_api
+         test_c_api test_mini_sql
 
 all: $(METALLIB_SRCS) $(TESTS) libmdb.a
 
@@ -93,6 +93,9 @@ test_string_gpu: $(OBJS) tests/test_string_gpu.cpp
 test_compound_where: $(OBJS) tests/test_compound_where.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+test_mini_sql: $(OBJS) tests/test_mini_sql.cpp mdb
+	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_mini_sql.cpp -o $@ $(LDFLAGS)
+
 # ---- C API library + C test ----
 libmdb.a: $(OBJS)
 	ar rcs $@ $^
@@ -124,6 +127,7 @@ run: all
 	./test_string_gpu
 	./test_compound_where
 	./test_c_api
+	./test_mini_sql
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)
@@ -136,6 +140,7 @@ clean:
 	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx *.mdb *.mdb.idx *.str
 	rm -f /tmp/c_*.mdb /tmp/c_*.mdb.idx /tmp/c_*.str
 	rm -f /tmp/py_*.mdb /tmp/py_*.mdb.idx /tmp/py_*.str
+	rm -f /tmp/sql_*.mdb /tmp/sql_*.mdb.idx /tmp/sql_*.str
 
 # Include dependency files (safe if missing)
 -include $(DEPS)

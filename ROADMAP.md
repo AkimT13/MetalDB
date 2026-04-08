@@ -1,8 +1,8 @@
 # MetalDB — Roadmap
 
 Current state: GPU-accelerated column-store. Supports UINT32 + STRING columns, insert/delete,
-equality/range/compound WHERE (AND/OR), groupby, hash join, persistence. Single-threaded,
-with C++, C, and internal Python (`ctypes`) APIs.
+equality/range/compound WHERE (AND/OR), groupby, hash join, persistence, and a small one-shot
+mini-SQL CLI query surface. Single-threaded, with C++, C, and internal Python (`ctypes`) APIs.
 
 ---
 
@@ -58,11 +58,11 @@ No parser required — raw insert/scan/groupby calls over a stable ABI.
 `pybind11` or `ctypes` wrapper around the C API. Makes MetalDB usable from data science
 workflows (pandas interop, Jupyter notebooks) without a network round-trip or query parser.
 
-### Query Language (mini-SQL)  [NEXT]
+### Query Language (mini-SQL)  [DONE, v1 CLI SURFACE]
 Parser for `SELECT col FROM table WHERE ... GROUP BY ...`. No subqueries or CTEs needed to
 cover 80% of analytical queries. Makes the engine usable without writing C++.
 
-### Networking / Server Mode  [AFTER QUERY LANGUAGE]
+### Networking / Server Mode  [NEXT]
 TCP server with a line protocol (or Postgres wire protocol subset). Any Postgres client, `psql`,
 JDBC, or `psycopg2` can connect without compiling C++. Requires a query language to be useful.
 

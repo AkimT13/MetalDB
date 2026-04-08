@@ -1,4 +1,5 @@
-
+#include "Engine.hpp"
+#include "MiniSQL.hpp"
 #include "Table.hpp"
 #include "ValueTypes.hpp"
 
@@ -18,8 +19,9 @@ static void usage(const char* argv0) {
         "  %s insert <file> <v0> [v1 ...]\n"
         "  %s select-eq <file> <col> <val>\n"
         "  %s select-between <file> <col> <lo> <hi>\n"
+        "  %s query <sql>\n"
         "  %s sum <file> <col>\n",
-        argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static bool parseU16(const char* s, uint16_t& out) {
@@ -41,6 +43,35 @@ static bool parseU32(const char* s, uint32_t& out) {
 int main(int argc, char** argv) {
     if (argc < 2) { usage(argv[0]); return 1; }
     std::string cmd = argv[1];
+
+    if (cmd == "query") {
+        if (argc < 3) { usage(argv[0]); return 1; }
+        std::string sql = argv[2];
+        for (int i = 3; i < argc; ++i) {
+            sql += ' ';
+            sql += argv[i];
+        }
+        try {
+            Engine engine;
+            const auto result = executeMiniSQL(engine, sql);
+            for (size_t i = 0; i < result.headers.size(); ++i) {
+                if (i) std::printf("\t");
+                std::printf("%s", result.headers[i].c_str());
+            }
+            std::printf("\n");
+            for (const auto& row : result.rows) {
+                for (size_t i = 0; i < row.size(); ++i) {
+                    if (i) std::printf("\t");
+                    std::printf("%s", row[i].c_str());
+                }
+                std::printf("\n");
+            }
+            return 0;
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "query error: %s\n", ex.what());
+            return 1;
+        }
+    }
 
     if (cmd == "create") {
         if (argc != 5) { usage(argv[0]); return 1; }
@@ -70,7 +101,7 @@ int main(int argc, char** argv) {
             row.push_back(static_cast<ValueType>(v));
         }
         if (row.size() != t.numColumns()) {
-            std::fprintf(stderr, "Expected %u values, got %zu\n",
+            std::fprintf(stderr, "Expected %zu values, got %zu\n",
                          t.numColumns(), row.size());
             return 1;
         }

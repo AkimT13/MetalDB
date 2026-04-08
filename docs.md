@@ -36,6 +36,28 @@ Python notes:
 
 ---
 
+## CLI Query Surface
+
+The `mdb` CLI now has a one-shot SQL entrypoint:
+
+- `./mdb query "<sql>"`
+
+Supported v1 query shape:
+- `SELECT c0, c1 FROM '/tmp/demo'`
+- optional flat `WHERE` with all `AND` or all `OR`
+- optional scalar aggregates `COUNT(*)`, `SUM(cN)`, `MIN(cN)`, `MAX(cN)`, `AVG(cN)`
+- optional `GROUP BY cN` with exactly one aggregate expression
+
+Important v1 limits:
+- table references are quoted base paths, not catalog names
+- columns are synthetic identifiers `c0`, `c1`, ...
+- mixed `AND` / `OR`, joins, aliases, `ORDER BY`, `LIMIT`, parentheses, subqueries, and CTEs are not supported
+- `GROUP BY ... WHERE ...` is not supported yet
+
+Output is tab-separated with a header row.
+
+---
+
 ## ValueTypes.hpp
 
 Defines the core type vocabulary.
