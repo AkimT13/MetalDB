@@ -19,7 +19,7 @@ METALLIB_SRCS := $(METAL_SRCS:.metal=.metallib)
 # Core sources (both .cpp and .mm)
 SRCS := MasterPage.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
         gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm gpu_string_scan.mm \
-        Engine.cpp GroupBy.cpp Join.cpp MiniSQL.cpp mdb_c.cpp
+        Engine.cpp GroupBy.cpp Join.cpp MiniSQL.cpp QuerySession.cpp Server.cpp mdb_c.cpp
 
 # Object files (+ auto-generated dependency files)
 OBJS := $(SRCS:.cpp=.o)
@@ -29,7 +29,7 @@ DEPS := $(OBJS:.o=.d)
 # Tests
 TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
          test_engine test_groupby test_join test_types test_string_gpu test_compound_where \
-         test_c_api test_mini_sql
+         test_c_api test_mini_sql test_server
 
 all: $(METALLIB_SRCS) $(TESTS) libmdb.a
 
@@ -96,6 +96,9 @@ test_compound_where: $(OBJS) tests/test_compound_where.cpp
 test_mini_sql: $(OBJS) tests/test_mini_sql.cpp mdb
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_mini_sql.cpp -o $@ $(LDFLAGS)
 
+test_server: $(OBJS) tests/test_server.cpp mdb
+	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_server.cpp -o $@ $(LDFLAGS)
+
 # ---- C API library + C test ----
 libmdb.a: $(OBJS)
 	ar rcs $@ $^
@@ -128,6 +131,7 @@ run: all
 	./test_compound_where
 	./test_c_api
 	./test_mini_sql
+	./test_server
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)

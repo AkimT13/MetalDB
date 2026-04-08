@@ -1,5 +1,7 @@
 #include "Engine.hpp"
 #include "MiniSQL.hpp"
+#include "QuerySession.hpp"
+#include "Server.hpp"
 #include "Table.hpp"
 #include "ValueTypes.hpp"
 
@@ -22,8 +24,9 @@ static void usage(const char* argv0) {
         "  %s select-between <file> <col> <lo> <hi>\n"
         "  %s query <sql>\n"
         "  %s repl\n"
+        "  %s serve <port>\n"
         "  %s sum <file> <col>\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static bool parseU16(const char* s, uint16_t& out) {
@@ -50,31 +53,6 @@ static std::string trim(const std::string& input) {
     while (end > start &&
            std::isspace(static_cast<unsigned char>(input[end - 1]))) --end;
     return input.substr(start, end - start);
-}
-
-static void printQueryResult(const MiniSQLResult& result) {
-    for (size_t i = 0; i < result.headers.size(); ++i) {
-        if (i) std::printf("\t");
-        std::printf("%s", result.headers[i].c_str());
-    }
-    std::printf("\n");
-    for (const auto& row : result.rows) {
-        for (size_t i = 0; i < row.size(); ++i) {
-            if (i) std::printf("\t");
-            std::printf("%s", row[i].c_str());
-        }
-        std::printf("\n");
-    }
-}
-
-static bool executeAndPrintQuery(Engine& engine, const std::string& sql, bool replMode) {
-    try {
-        printQueryResult(executeMiniSQL(engine, sql));
-        return true;
-    } catch (const std::exception& ex) {
-        std::fprintf(stderr, "%s error: %s\n", replMode ? "repl" : "query", ex.what());
-        return false;
-    }
 }
 
 static void printReplHelp() {
@@ -132,7 +110,7 @@ static int runRepl() {
             const std::string statement = trim(pending.substr(0, termPos));
             pending.erase(0, termPos + 1);
             pending = trim(pending);
-            if (!statement.empty()) (void)executeAndPrintQuery(engine, statement, true);
+            if (!statement.empty()) (void)executeMiniSQLToStream(engine, statement, "repl");
         }
     }
 }
@@ -149,12 +127,22 @@ int main(int argc, char** argv) {
             sql += argv[i];
         }
         Engine engine;
-        return executeAndPrintQuery(engine, sql, false) ? 0 : 1;
+        return executeMiniSQLToStream(engine, sql, "query") ? 0 : 1;
     }
 
     if (cmd == "repl") {
         if (argc != 2) { usage(argv[0]); return 1; }
         return runRepl();
+    }
+
+    if (cmd == "serve") {
+        if (argc != 3) { usage(argv[0]); return 1; }
+        uint16_t port = 0;
+        if (!parseU16(argv[2], port) || port == 0) {
+            std::fprintf(stderr, "Bad port\n");
+            return 1;
+        }
+        return runServer(port);
     }
 
     if (cmd == "create") {

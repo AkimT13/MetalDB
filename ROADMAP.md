@@ -1,9 +1,9 @@
 # MetalDB — Roadmap
 
 Current state: GPU-accelerated column-store. Supports UINT32 + STRING columns, insert/delete,
-equality/range/compound WHERE (AND/OR), groupby, hash join, persistence, and a small one-shot
-mini-SQL CLI query surface plus a thin interactive REPL. Single-threaded, with C++, C, and
-internal Python (`ctypes`) APIs.
+equality/range/compound WHERE (AND/OR), groupby, hash join, persistence, a small one-shot
+mini-SQL CLI query surface, a thin interactive REPL, and a minimal loopback TCP server.
+Single-threaded, with C++, C, and internal Python (`ctypes`) APIs.
 
 ---
 
@@ -63,9 +63,15 @@ workflows (pandas interop, Jupyter notebooks) without a network round-trip or qu
 Parser for `SELECT col FROM table WHERE ... GROUP BY ...`. No subqueries or CTEs needed to
 cover 80% of analytical queries. Makes the engine usable without writing C++.
 
-### Networking / Server Mode  [NEXT]
-TCP server with a line protocol (or Postgres wire protocol subset). Any Postgres client, `psql`,
-JDBC, or `psycopg2` can connect without compiling C++. Requires a query language to be useful.
+### Networking / Server Mode  [DONE, v1 LINE PROTOCOL]
+`mdb serve <port>` now exposes the mini-SQL executor over a simple loopback TCP server:
+- one request per line
+- response framed with `END`
+- `OK` or `ERR\t...` status
+- `.quit` closes a client session cleanly
+
+Still intentionally missing: Postgres wire compatibility, auth, concurrency, and durable
+server-oriented write semantics.
 
 ---
 

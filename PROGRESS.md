@@ -159,19 +159,54 @@ Verified:
 
 ---
 
+### Phase 7 — TCP Server Mode (complete, minimal line protocol)
+Added a network entrypoint to the CLI:
+
+- `mdb serve <port>`
+
+The server is intentionally small and reuses the same `executeMiniSQL()` path used by
+`mdb query` and `mdb repl`. Current behavior:
+
+- listens on `127.0.0.1:<port>`
+- handles one request per line
+- keeps each client connection open for multiple sequential requests
+- returns explicit framed responses ending in `END`
+- accepts `.quit` per connection and replies with `BYE`
+
+Wire format in v1:
+
+- success: `OK` line, tab-separated result body, then `END`
+- error: `ERR\t<message>` line, then `END`
+
+Coverage:
+
+- end-to-end TCP integration in `test_server`
+- success, aggregate, malformed SQL, empty request, `.quit`, and reconnect behavior
+- missing-table query verified to return `ERR` without creating a typo file
+
+Verified:
+
+- `make -C src fast TEST=test_server`
+
+Note: local TCP bind/connect verification required running this test outside the default
+sandbox on this machine.
+
+---
+
 ## Known Issues / Next Work
 
-### Next Logical Usability Step — Server Mode
+### Next Logical Usability Step — Postgres Wire Or WAL
 
-The local usability stack is now present: C API, internal Python bindings, one-shot mini-SQL,
-and a thin REPL. The next logical step is server mode so the query surface can be exercised
-from external clients without linking directly against the repo.
+The local and minimal remote usability surfaces are now present: C API, internal Python
+bindings, one-shot mini-SQL, REPL, and a loopback TCP server. The next decision is whether to:
+
+- move the server toward real client compatibility with a Postgres wire subset, or
+- shift to durability work (WAL + group commit) before making long-running server usage a goal
 
 Recommended scope:
 
-- single-process TCP server
-- line-oriented request / response protocol first, not Postgres wire protocol yet
-- reuse the existing mini-SQL executor
+- Postgres-wire path: authentication-free local prototype, simple query messages only
+- WAL path: durable inserts and crash recovery before broadening server expectations
 - keep concurrency single-threaded until page-cache / row-index locking exists
 
 ### GPU Group By Performance

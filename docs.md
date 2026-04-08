@@ -42,6 +42,7 @@ The `mdb` CLI now has a one-shot SQL entrypoint:
 
 - `./mdb query "<sql>"`
 - `./mdb repl`
+- `./mdb serve <port>`
 
 Supported v1 query shape:
 - `SELECT c0, c1 FROM '/tmp/demo'`
@@ -63,6 +64,24 @@ REPL notes:
 - `.help` prints the built-in command summary
 - `.quit` exits the session
 - REPL execution uses the same mini-SQL executor as `mdb query`
+
+Server notes:
+- the server listens on `127.0.0.1:<port>`
+- each newline-terminated request is treated as one SQL statement
+- each response ends with `END\n`
+- successful responses begin with `OK\n`
+- failures begin with `ERR\t<message>\n`
+- sending `.quit` returns `BYE\nEND\n` and closes that client session
+
+Example request / response:
+
+```text
+client> SELECT c0, c1 FROM '/tmp/demo' WHERE c0 = 2
+server> OK
+server> c0\tc1
+server> 2\t20
+server> END
+```
 
 ---
 
