@@ -1,4 +1,5 @@
 CXX      := clang++
+CC       := clang
 CXXFLAGS := -std=c++17 -arch arm64 -I/usr/local/share/metal-cpp -g -MMD -MP
 LDFLAGS  := -framework Metal -framework Foundation
 
@@ -18,7 +19,7 @@ METALLIB_SRCS := $(METAL_SRCS:.metal=.metallib)
 # Core sources (both .cpp and .mm)
 SRCS := MasterPage.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
         gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm gpu_string_scan.mm \
-        Engine.cpp GroupBy.cpp Join.cpp
+        Engine.cpp GroupBy.cpp Join.cpp mdb_c.cpp
 
 # Object files (+ auto-generated dependency files)
 OBJS := $(SRCS:.cpp=.o)
@@ -27,9 +28,10 @@ DEPS := $(OBJS:.o=.d)
 
 # Tests
 TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
-         test_engine test_groupby test_join test_types test_string_gpu test_compound_where
+         test_engine test_groupby test_join test_types test_string_gpu test_compound_where \
+         test_c_api
 
-all: $(METALLIB_SRCS) $(TESTS)
+all: $(METALLIB_SRCS) $(TESTS) libmdb.a
 
 # Compile rules
 %.o: %.mm
@@ -91,6 +93,21 @@ test_string_gpu: $(OBJS) tests/test_string_gpu.cpp
 test_compound_where: $(OBJS) tests/test_compound_where.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+# ---- C API library + C test ----
+libmdb.a: $(OBJS)
+	ar rcs $@ $^
+
+libmdb.dylib: $(OBJS)
+	$(CXX) -dynamiclib $(OBJS) -framework Metal -framework Foundation -lc++ -o $@
+
+test_c_api: libmdb.a tests/test_c_api.c
+	$(CC) -std=c11 -arch arm64 -I. tests/test_c_api.c -L. -lmdb \
+	    -framework Metal -framework Foundation -lc++ -o $@
+
+.PHONY: test-python
+test-python: libmdb.dylib
+	python3 ../python/test_mdb.py
+
 .PHONY: run clean fast
 
 # Run the full suite
@@ -106,6 +123,7 @@ run: all
 	./test_types
 	./test_string_gpu
 	./test_compound_where
+	./test_c_api
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)
@@ -113,9 +131,11 @@ fast: $(TESTS)
 	./$(TEST)
 
 clean:
-	rm -f $(OBJS) $(DEPS) $(TESTS) mdb mdb.o
+	rm -f $(OBJS) $(DEPS) $(TESTS) mdb mdb.o libmdb.a libmdb.dylib
 	rm -f $(METALLIB_SRCS) $(METAL_SRCS:.metal=.air)
 	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx *.mdb *.mdb.idx *.str
+	rm -f /tmp/c_*.mdb /tmp/c_*.mdb.idx /tmp/c_*.str
+	rm -f /tmp/py_*.mdb /tmp/py_*.mdb.idx /tmp/py_*.str
 
 # Include dependency files (safe if missing)
 -include $(DEPS)

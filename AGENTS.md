@@ -22,8 +22,12 @@ Use C++17 with existing Apple/Metal conventions. Match the surrounding files: 4-
 ## Testing Guidelines
 Add or update focused regression tests in `src/tests/` for any behavior change. Follow the current naming pattern such as `test_groupby.cpp` or `test_string_gpu.cpp`. Run `make -C src run` before opening a PR; for faster iteration use `make -C src fast TEST=test_join`. No formal coverage gate is checked in, so rely on targeted test additions for new storage, GPU, and persistence paths.
 
+## Progress Log
+Keep [`PROGRESS.md`](/Users/akimtarasov/Desktop/Development/MetalDB/PROGRESS.md) current. Any meaningful feature work, interface change, benchmark update, or completed fix should be reflected there in the same turn, and `PROGRESS.md` should be updated before creating a commit.
+
 ## Commit & Pull Request Guidelines
 Recent history favors short, imperative commit subjects, often scoped by feature or phase, for example `Add STRING column support via per-column heap file` or `Phase 3: GPU group-by kernel...`. Keep commits narrow and descriptive. PRs should explain the user-visible or storage-format impact, list test commands run, and call out any macOS/Metal prerequisites. Include sample output or screenshots only when CLI behavior changes materially.
+Commit regularly for completed, coherent increments instead of batching many unrelated changes into one large commit.
 
 ## Environment & Configuration Notes
 This project targets macOS on Apple Silicon with Metal available. The current build expects Metal C++ headers at `/usr/local/share/metal-cpp`; if you use the vendored copy, update include paths consistently rather than mixing both setups.

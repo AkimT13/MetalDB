@@ -58,7 +58,65 @@ Tests: `test_groupby` passes (correctness verified, CPU and GPU results agree).
 
 ---
 
+### Phase 4 — C API + Python Bindings (complete, internal developer API)
+Added a pure C wrapper in `src/mdb.h` / `src/mdb_c.cpp` covering table creation,
+typed insert/fetch/delete, equality/range scans, compound `WHERE`, aggregations,
+group-by, and join. The wrapper now validates caller input before reaching
+assert-backed engine internals and clears stale `lastError` state after successful calls.
+
+Added an internal Python API in `python/mdb.py` using `ctypes` over `libmdb.dylib`.
+This exposes:
+
+- `Engine`
+- `Predicate`
+- type constants `UINT32`, `INT64`, `FLOAT`, `DOUBLE`, `STRING`
+- `MdbError`
+
+Python-side validation now rejects invalid schema definitions, bad predicate objects,
+negative / oversized column indexes, closed-engine usage, and obvious value/type
+mismatches before crossing the C boundary. UTF-8 string round-trip and compound
+predicate paths are covered in `python/test_mdb.py`.
+
+Build/test support:
+
+- `make -C src test_c_api`
+- `make -C src test-python`
+
+Verified:
+
+- `make -C src test-python`
+- `make -C src run`
+
+Design choice for now: keep the Python layer as an in-repo internal developer API.
+Packaging (`pyproject.toml`, wheels, install-time dylib handling) is explicitly deferred
+until the API surface stabilizes.
+
+---
+
 ## Known Issues / Next Work
+
+### Next Logical Usability Step — Mini-SQL / CLI Query Surface
+
+With the C API and internal Python bindings now working, the next logical usability step is
+a small query-language layer rather than more binding work. The roadmap ordering now points to:
+
+`C API -> Python bindings -> mini-SQL -> networking`
+
+Why this is next:
+
+- It turns existing engine operations into a human-usable interface without requiring C++ or Python code.
+- It exercises the current feature set end-to-end: projection, compound `WHERE`, `GROUP BY`, and join.
+- It creates the minimal substrate needed before any future server mode is useful.
+
+Recommended scope for the first increment:
+
+- `SELECT <cols> FROM <table>`
+- `WHERE` with flat `AND` / `OR`
+- `GROUP BY`
+- simple aggregates already present in the engine
+- no subqueries, no CTEs, no planner work
+
+Keep it small and route directly into existing engine operations.
 
 ### GPU Group By Performance
 

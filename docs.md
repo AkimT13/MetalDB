@@ -20,6 +20,22 @@ Each table produces two files:
 
 ---
 
+## C And Python APIs
+
+MetalDB now exposes a pure C surface in `src/mdb.h` and an in-repo Python wrapper in `python/mdb.py`.
+
+Build and test flow:
+- `make -C src test_c_api` builds the C wrapper and runs the C tests.
+- `make -C src test-python` builds `src/libmdb.dylib` and runs the Python integration tests.
+
+Python notes:
+- The Python layer uses `ctypes`; there is no compiled Python extension yet.
+- It expects `libmdb.dylib` either in `python/` or `src/`.
+- Reopened tables still require explicit schema registration via `Engine.open_table(name, col_types)`.
+- Wrapper-side validation raises `ValueError` for Python argument mistakes and `MdbError` for engine/C API failures.
+
+---
+
 ## ValueTypes.hpp
 
 Defines the core type vocabulary.
