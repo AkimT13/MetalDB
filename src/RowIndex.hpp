@@ -30,8 +30,7 @@ public:
     // Number of live rows (cheap estimate: rowsRecorded - deletedCount)
     uint32_t liveRows() const { return rowsRecorded() - deletedCount_; }
     void forEachLive(const std::function<void(uint32_t, const std::vector<uint32_t>&)>& fn) const;
-
-   
+    void forEachLiveID(const std::function<void(uint32_t)>& fn) const;
 
     // Load all rows from disk (called by openOrCreate)
     void loadAll();

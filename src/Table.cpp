@@ -2,9 +2,11 @@
 #include "Table.hpp"
 #include "ColumnFile.hpp"
 #include "gpu_string_scan.h"
+#include <algorithm>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cassert>
+#include <stdexcept>
 #include <unordered_map>
 // GPU hooks (implemented in gpu_scan_equals.mm)
 extern "C" bool metalIsAvailable();
@@ -83,6 +85,137 @@ std::vector<uint32_t> Table::whereBetween(uint16_t colIdx, ValueType lo, ValueTy
 
     // GPU path
     return gpuScanBetween(values, rowIDs, static_cast<uint32_t>(lo), static_cast<uint32_t>(hi));
+}
+
+void Table::validatePredicate(const Predicate& predicate) const {
+    if (predicate.colIdx >= cols_.size())
+        throw std::invalid_argument("predicate column index out of bounds");
+
+    const ColType type = cols_[predicate.colIdx].colType();
+    switch (predicate.kind) {
+        case Predicate::Kind::EQ:
+            if (type != ColType::UINT32)
+                throw std::invalid_argument("numeric predicates require UINT32 columns");
+            return;
+        case Predicate::Kind::BETWEEN:
+            if (type != ColType::UINT32)
+                throw std::invalid_argument("numeric predicates require UINT32 columns");
+            if (predicate.lo > predicate.hi)
+                throw std::invalid_argument("BETWEEN predicates require lo <= hi");
+            return;
+        case Predicate::Kind::EQ_STRING:
+            if (type != ColType::STRING)
+                throw std::invalid_argument("string predicates require STRING columns");
+            return;
+        default:
+            throw std::invalid_argument("unknown predicate kind");
+    }
+}
+
+void Table::validatePredicates(const std::vector<Predicate>& predicates) const {
+    for (const auto& predicate : predicates)
+        validatePredicate(predicate);
+}
+
+std::vector<uint32_t> Table::allLiveRowIDs() const {
+    std::vector<uint32_t> rowIDs;
+    rowIDs.reserve(rowIndex_.liveRows());
+    rowIndex_.forEachLiveID([&](uint32_t rowID) { rowIDs.push_back(rowID); });
+    return rowIDs;
+}
+
+std::vector<uint32_t> Table::scanPredicate(const Predicate& predicate) {
+    validatePredicate(predicate);
+
+    switch (predicate.kind) {
+        case Predicate::Kind::EQ:
+            return scanEquals(predicate.colIdx, predicate.lo);
+        case Predicate::Kind::BETWEEN:
+            return whereBetween(predicate.colIdx, predicate.lo, predicate.hi);
+        case Predicate::Kind::EQ_STRING:
+            return scanEqualsString(predicate.colIdx, predicate.needle);
+        default:
+            throw std::invalid_argument("unknown predicate kind");
+    }
+}
+
+std::vector<uint32_t> Table::intersectRowIDs(const std::vector<uint32_t>& lhs,
+                                             const std::vector<uint32_t>& rhs) {
+    assert(std::is_sorted(lhs.begin(), lhs.end()));
+    assert(std::is_sorted(rhs.begin(), rhs.end()));
+
+    std::vector<uint32_t> out;
+    out.reserve(std::min(lhs.size(), rhs.size()));
+
+    size_t i = 0, j = 0;
+    while (i < lhs.size() && j < rhs.size()) {
+        if (lhs[i] == rhs[j]) {
+            out.push_back(lhs[i]);
+            ++i;
+            ++j;
+        } else if (lhs[i] < rhs[j]) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return out;
+}
+
+std::vector<uint32_t> Table::unionRowIDs(const std::vector<uint32_t>& lhs,
+                                         const std::vector<uint32_t>& rhs) {
+    assert(std::is_sorted(lhs.begin(), lhs.end()));
+    assert(std::is_sorted(rhs.begin(), rhs.end()));
+
+    std::vector<uint32_t> out;
+    out.reserve(lhs.size() + rhs.size());
+
+    size_t i = 0, j = 0;
+    while (i < lhs.size() && j < rhs.size()) {
+        if (lhs[i] == rhs[j]) {
+            out.push_back(lhs[i]);
+            ++i;
+            ++j;
+        } else if (lhs[i] < rhs[j]) {
+            out.push_back(lhs[i++]);
+        } else {
+            out.push_back(rhs[j++]);
+        }
+    }
+    while (i < lhs.size()) out.push_back(lhs[i++]);
+    while (j < rhs.size()) out.push_back(rhs[j++]);
+    return out;
+}
+
+std::vector<uint32_t> Table::whereAnd(const std::vector<Predicate>& predicates) {
+    validatePredicates(predicates);
+    if (predicates.empty()) return allLiveRowIDs();
+
+    std::vector<uint32_t> result = scanPredicate(predicates.front());
+    for (size_t i = 1; i < predicates.size(); ++i) {
+        if (result.empty()) return result;
+        // GPU scans may return unsorted IDs; sort both operands for merge.
+        std::sort(result.begin(), result.end());
+        auto rhs = scanPredicate(predicates[i]);
+        std::sort(rhs.begin(), rhs.end());
+        result = intersectRowIDs(result, rhs);
+    }
+    return result;
+}
+
+std::vector<uint32_t> Table::whereOr(const std::vector<Predicate>& predicates) {
+    validatePredicates(predicates);
+    if (predicates.empty()) return {};
+    // Single predicate: return raw scan result (same as whereEq / whereBetween).
+    if (predicates.size() == 1) return scanPredicate(predicates[0]);
+
+    std::vector<uint32_t> result; // starts empty (trivially sorted)
+    for (const auto& predicate : predicates) {
+        auto rhs = scanPredicate(predicate);
+        std::sort(rhs.begin(), rhs.end());
+        result = unionRowIDs(result, rhs); // result is sorted after each union
+    }
+    return result;
 }
 
 Table::Table(const std::string& path, uint16_t pageSize, uint16_t numColumns)

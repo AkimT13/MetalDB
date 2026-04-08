@@ -49,6 +49,14 @@ std::vector<uint32_t> Engine::whereBetween(const std::string& name, uint16_t col
     return openTable(name).whereBetween(col, lo, hi);
 }
 
+std::vector<uint32_t> Engine::whereAnd(const std::string& name, const std::vector<Predicate>& predicates) {
+    return openTable(name).whereAnd(predicates);
+}
+
+std::vector<uint32_t> Engine::whereOr(const std::string& name, const std::vector<Predicate>& predicates) {
+    return openTable(name).whereOr(predicates);
+}
+
 ValueType Engine::sum(const std::string& name, uint16_t col) {
     return openTable(name).sumColumnHybrid(col);
 }

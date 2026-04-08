@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 #include "Table.hpp"
+#include "Predicate.hpp"
 
 class Engine {
 public:
@@ -20,6 +21,8 @@ public:
     std::vector<uint32_t> whereEq(const std::string& name, uint16_t col, ValueType v);
     std::vector<uint32_t> whereEqString(const std::string& name, uint16_t col, const std::string& needle);
     std::vector<uint32_t> whereBetween(const std::string& name, uint16_t col, ValueType lo, ValueType hi);
+    std::vector<uint32_t> whereAnd(const std::string& name, const std::vector<Predicate>& predicates);
+    std::vector<uint32_t> whereOr(const std::string& name, const std::vector<Predicate>& predicates);
     ValueType sum(const std::string& name, uint16_t col);
     ValueType minColumn(const std::string& name, uint16_t col);
     ValueType maxColumn(const std::string& name, uint16_t col);

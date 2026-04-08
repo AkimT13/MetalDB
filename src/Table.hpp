@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "ValueTypes.hpp"
+#include "Predicate.hpp"
 #include "MasterPage.hpp"
 #include "ColumnFile.hpp"
 #include "RowIndex.hpp"
@@ -24,6 +25,9 @@ public:
           const std::vector<ColType>& colTypes);
     Table(const std::string &path);  // open existing
     std::vector<uint32_t> whereBetween(uint16_t colIdx, ValueType lo, ValueType hi);
+    std::vector<uint32_t> scanPredicate(const Predicate& predicate);
+    std::vector<uint32_t> whereAnd(const std::vector<Predicate>& predicates);
+    std::vector<uint32_t> whereOr(const std::vector<Predicate>& predicates);
 
     // Knobs
     void setUseGPU(bool on) { useGPU_ = on; }
@@ -60,13 +64,22 @@ public:
     projectRows(const std::vector<uint32_t> &rowIDs, const std::vector<uint16_t> &cols);
     // Helper access for algos: expose column file and a forEach wrapper
     inline ColumnFile &columnFile(uint16_t c) { return cols_[c]; }
+    inline const ColumnFile &columnFile(uint16_t c) const { return cols_[c]; }
 
     template <typename Fn>
     void rowIndexForEachLive(Fn fn) { rowIndex_.forEachLive(fn); }
     size_t numColumns() const { return cols_.size(); }
 
+    static std::vector<uint32_t> intersectRowIDs(const std::vector<uint32_t>& lhs,
+                                                 const std::vector<uint32_t>& rhs);
+    static std::vector<uint32_t> unionRowIDs(const std::vector<uint32_t>& lhs,
+                                             const std::vector<uint32_t>& rhs);
+
 private:
     void openOrCreate(uint16_t pageSize, uint16_t numColumns, bool create);
+    std::vector<uint32_t> allLiveRowIDs() const;
+    void validatePredicate(const Predicate& predicate) const;
+    void validatePredicates(const std::vector<Predicate>& predicates) const;
 
     // CPU helper (over materialized vectors)
     std::vector<uint32_t> scanEqualsCPUFromMaterialized(uint16_t colIdx, ValueType val);

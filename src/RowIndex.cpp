@@ -95,6 +95,12 @@ void RowIndex::forEachLive(const std::function<void(uint32_t, const std::vector<
     }
 }
 
+void RowIndex::forEachLiveID(const std::function<void(uint32_t)>& fn) const {
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+        if (entries_[i].status == 1) fn(i);
+    }
+}
+
 void RowIndex::markDeleted(uint32_t rowID) {
     if (rowID >= entries_.size()) return;
     if (entries_[rowID].status == 0) return;
