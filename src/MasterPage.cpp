@@ -60,6 +60,9 @@ void MasterPage::flush(int fd) const {
         uint8_t b = static_cast<uint8_t>(t);
         writeAll(fd, &b, 1);
     }
+}
+
+void MasterPage::sync(int fd) const {
     fsync(fd);
 }
 

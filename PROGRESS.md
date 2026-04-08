@@ -195,6 +195,29 @@ sandbox on this machine.
 
 ## Known Issues / Next Work
 
+### Phase 8 — WAL + Group Commit (in progress)
+
+Core WAL plumbing is now in place under `src/Wal.cpp` and integrated into `Table`.
+Current state of the implementation:
+
+- per-table WAL sidecar at `<table>.mdb.wal`
+- WAL records for `insert` and `delete`, each followed by a commit marker
+- recovery on table open with trailing partial / bad-checksum records ignored
+- replayed operations checkpointed back into base files and WAL truncated to header
+- low-level per-write `fsync` removed from `ColumnFile` and `RowIndex`
+- explicit `Table::flushDurable()` added as the durable checkpoint boundary
+
+Coverage so far:
+
+- dedicated recovery and corruption-tail test in `test_wal`
+- regressions still green in `test_engine`, `test_mini_sql`, and `test_server`
+
+Remaining work in this phase:
+
+- expose `flush` through `Engine`, CLI, C API, and Python
+- add C/Python durability tests
+- update roadmap/docs after the public surface is complete
+
 ### Next Logical Usability Step — Postgres Wire Or WAL
 
 The local and minimal remote usability surfaces are now present: C API, internal Python

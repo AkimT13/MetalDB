@@ -198,8 +198,6 @@ void ColumnFile::flushPage(const ColumnPage &page) {
             std::perror("ColumnFile::flushPage pwrite(tombstone)");
     }
 
-    fsync(fd_);
-
     // Keep the in-memory cache in sync with what was just written
     pageCache_.insert_or_assign(page.pageID, page);
 }
@@ -238,7 +236,6 @@ uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
             uint32_t len     = static_cast<uint32_t>(val.str.size());
             if (len > 0)
                 pwrite(heapFd_, val.str.data(), len, end);
-            fsync(heapFd_);
             uint32_t pair[2] = { heapOff, len };
             page.writeRaw(slot, pair, 8);
             break;
@@ -305,6 +302,11 @@ void ColumnFile::deleteSlot(uint32_t id) {
 
 void ColumnFile::flushMaster() {
     mp_.flush(fd_);
+}
+
+void ColumnFile::syncData() const {
+    if (fd_ >= 0) fsync(fd_);
+    if (heapFd_ >= 0) fsync(heapFd_);
 }
 
 void ColumnFile::packStringsForGPU(const std::vector<uint32_t>& slotIDs,

@@ -22,8 +22,8 @@ struct MasterPage {
 
     // Write the in-memory MasterPage back to page 0:
     void flush(int fd) const;
+    void sync(int fd) const;
 };
-
 
 
 

@@ -9,6 +9,7 @@
 #include "MasterPage.hpp"
 #include "ColumnFile.hpp"
 #include "RowIndex.hpp"
+#include "Wal.hpp"
 
 class Table
 {
@@ -39,6 +40,7 @@ public:
     std::vector<std::optional<ValueType>> fetchRow(uint32_t rowID);
     std::vector<std::optional<ColValue>>  fetchTypedRow(uint32_t rowID);
     void deleteRow(uint32_t rowID);
+    void flushDurable();
 
     // Scans / Aggregates
     std::vector<ValueType> materializeColumn(uint16_t colIdx);
@@ -80,6 +82,9 @@ private:
     std::vector<uint32_t> allLiveRowIDs() const;
     void validatePredicate(const Predicate& predicate) const;
     void validatePredicates(const std::vector<Predicate>& predicates) const;
+    void recoverFromWal();
+    uint32_t insertTypedRowInternal(const std::vector<ColValue>& values, uint32_t expectedRowID);
+    void deleteRowInternal(uint32_t rowID);
 
     // CPU helper (over materialized vectors)
     std::vector<uint32_t> scanEqualsCPUFromMaterialized(uint16_t colIdx, ValueType val);
@@ -89,6 +94,7 @@ private:
     MasterPage mp_;
     std::vector<ColumnFile> cols_;
     RowIndex rowIndex_;
+    Wal wal_;
 
     // GPU usage knobs (single definition!)
     bool useGPU_ = true;

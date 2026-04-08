@@ -35,6 +35,7 @@ public:
 
     // Persist any changes to the MasterPage (e.g. updated head-pointer)
     void flushMaster();
+    void syncData() const;
 
     // Number of pages = file_size / pageSize_
     uint16_t pageCount() const;

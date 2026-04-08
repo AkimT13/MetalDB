@@ -36,7 +36,6 @@ void RowIndex::ensureHeaderOnCreate() {
     if (write(fd_, &magic, sizeof(magic)) != (ssize_t)sizeof(magic)) perror("write(magic)");
     if (write(fd_, &ncols, sizeof(ncols)) != (ssize_t)sizeof(ncols)) perror("write(numCols)");
     if (write(fd_, &zero,  sizeof(zero))  != (ssize_t)sizeof(zero))  perror("write(reserved)");
-    if (fsync(fd_) == -1) perror("fsync(header)");
 }
 
 void RowIndex::loadAll() {
@@ -119,11 +118,18 @@ void RowIndex::writeEntry(uint32_t rowID, const Entry& e) {
     if (write(fd_, &e.status, 1) != 1) perror("write(status)");
     if (write(fd_, pad, 3) != 3) perror("write(pad)");
     if (write(fd_, e.slots.data(), sizeof(uint32_t) * numColumns_) != (ssize_t)(sizeof(uint32_t) * numColumns_)) perror("write(slots)");
-    if (fsync(fd_) == -1) perror("fsync(entry)");
 }
 
 std::optional<std::vector<uint32_t>> RowIndex::fetch(uint32_t rowID) const {
     if (rowID >= entries_.size()) return std::nullopt;
     if (entries_[rowID].status == 0) return std::nullopt;
     return entries_[rowID].slots;
+}
+
+bool RowIndex::isLive(uint32_t rowID) const {
+    return rowID < entries_.size() && entries_[rowID].status == 1;
+}
+
+void RowIndex::sync() const {
+    if (fd_ >= 0) fsync(fd_);
 }
