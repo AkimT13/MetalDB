@@ -203,13 +203,23 @@ ValueType Table::sumColumn(uint16_t colIdx) {
 Table::Materialized Table::materializeColumnWithRowIDs(uint16_t colIdx) {
     assert(colIdx < cols_.size());
     Materialized m;
-    m.values.reserve(1024);
-    m.rowIDs.reserve(1024);
+    m.values.reserve(rowIndex_.liveRows());
+    m.rowIDs.reserve(rowIndex_.liveRows());
 
-    rowIndex_.forEachLive([&](uint32_t rowID, const std::vector<uint32_t>& slots){
-        auto v = cols_[colIdx].fetchSlot(slots[colIdx]);
-        if (v) {
-            m.values.push_back(*v);
+    ColumnFile& col = cols_[colIdx];
+    // Cache the last page pointer: consecutive rows in a sequentially-inserted
+    // table land on the same page, so we do O(pages) hash-map lookups instead
+    // of O(rows). Row order is preserved (required for key/value alignment in GroupBy).
+    uint16_t lastPid = UINT16_MAX;
+    const ColumnPage* lastPage = nullptr;
+
+    rowIndex_.forEachLive([&](uint32_t rowID, const std::vector<uint32_t>& slots) {
+        uint32_t slotID  = slots[colIdx];
+        uint16_t pid     = ColumnFile::pageIdFromSlotId(slotID);
+        uint16_t slotIdx = ColumnFile::slotIdxFromSlotId(slotID);
+        if (pid != lastPid) { lastPage = &col.pageRef(pid); lastPid = pid; }
+        if (slotIdx < lastPage->capacity && lastPage->tombstone[slotIdx]) {
+            m.values.push_back(lastPage->readValue(slotIdx));
             m.rowIDs.push_back(rowID);
         }
     });
@@ -330,4 +340,3 @@ ValueType Table::sumColumnHybrid(uint16_t colIdx) {
     uint64_t s = gpuSumU32(vals);
     return static_cast<ValueType>(s);
 }
-

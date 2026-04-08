@@ -96,19 +96,23 @@ in-memory cache. `fetchTypedSlot` now uses this reference instead of returning a
 with 100k rows this produced ~400 MB of heap churn (~1.8s per materialize call).
 Fixed in `src/ColumnFile.hpp` and `src/ColumnFile.cpp`.
 
-### Remaining Bottleneck: materializeColumnWithRowIDs (NEXT PRIORITY)
+### materializeColumnWithRowIDs — Page Cache Optimization (DONE)
 
-The hot path at 58ms is now dominated by `materializeColumnWithRowIDs` (~18ms per call,
-3 calls × 18ms = 54ms). The GPU kernel itself runs in <2ms once data is loaded.
+Root cause was O(rows) `unordered_map` lookups into the page cache even after warm-up.
 
-Root cause: the current implementation iterates the row index and calls `fetchTypedSlot`
-per slot, which does a hash-map lookup into the page cache on every row.
+**Fix applied:** Cache the last-accessed `ColumnPage*` in `materializeColumnWithRowIDs`.
+Consecutive rows inserted sequentially share the same page, so the cached pointer is
+reused for ~capacity rows before a new `pageRef()` hash-map call is needed. This reduces
+hash-map lookups from O(rows) → O(pages) (~25 vs 100k for the test case).
 
-**Next fix — Page-scan materialization optimization:**
-Instead of row-index iteration + per-slot `fetchTypedSlot`, scan pages directly in
-sequential order and copy contiguous value arrays in bulk. Expected improvement:
-~18ms → ~2ms per call (~10x speedup for materialization), which would bring the
-100k-row hot path from ~58ms to ~10ms or less.
+`ColumnFile::pageRef` was promoted to the public API to enable this (and future callers).
+
+Measured on `test_groupby` (100k rows, 10 keys):
+
+| State | Cold | Hot |
+|-------|------|-----|
+| Before (phase c) | ~105ms | ~58ms |
+| After page-cache optimization | ~69ms | ~35ms |
 
 ### 32-bit Sum Overflow in GPU Path
 `bucketSums` uses `device atomic_uint` (32-bit). Per-group sums overflow if they exceed

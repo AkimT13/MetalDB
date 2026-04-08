@@ -56,6 +56,10 @@ public:
     static inline uint16_t pageIdFromSlotId(uint32_t id) { return uint16_t(id >> 16); }
     static inline uint16_t slotIdxFromSlotId(uint32_t id) { return uint16_t(id & 0xFFFF); }
 
+    // Ensure a page is in the cache and return a const reference (no copy).
+    // Only safe while no mutation of pageCache_ occurs.
+    const ColumnPage& pageRef(uint16_t pageID) const;
+
 private:
     int fd_;            // OS file descriptor for this column file
     int heapFd_ = -1;  // heap file for STRING columns (-1 if not STRING)
@@ -76,9 +80,6 @@ private:
     ColumnPage loadPage(uint16_t pageID) const;
     void flushPage(const ColumnPage &page);
 
-    // Ensure a page is in the cache and return a reference to it (no copy).
-    // Only safe while no mutation of pageCache_ occurs.
-    const ColumnPage& pageRef(uint16_t pageID) const;
 
     // Helpers to get/set the head of our free-page list
     uint16_t headPageID() const { return mp_.headPageIDs[colIdx_]; }
