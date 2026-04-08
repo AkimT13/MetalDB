@@ -133,16 +133,46 @@ Verified:
 
 ---
 
+### Phase 6 — Interactive REPL (complete, thin layer over mini-SQL)
+Added an interactive mode to the CLI:
+
+- `mdb repl`
+
+The REPL intentionally reuses the same `executeMiniSQL()` path as `mdb query`, so query
+semantics stay aligned and there is no second execution path to maintain. Supported REPL
+behavior:
+
+- `mdb> ` primary prompt and `...> ` continuation prompt
+- `;`-terminated statements, including multiline queries
+- `.help` and `.quit`
+- tab-separated result printing with the same header/row format as one-shot queries
+
+Coverage:
+
+- REPL smoke coverage in `test_mini_sql`
+- multiline statement execution through `./mdb repl` in the same test
+
+Verified:
+
+- `make -C src fast TEST=test_mini_sql`
+- `make -C src run`
+
+---
+
 ## Known Issues / Next Work
 
-### Next Logical Usability Step — REPL Polish Or Server Mode
+### Next Logical Usability Step — Server Mode
 
-The one-shot mini-SQL query surface is now in place. The next usability decision is whether to:
+The local usability stack is now present: C API, internal Python bindings, one-shot mini-SQL,
+and a thin REPL. The next logical step is server mode so the query surface can be exercised
+from external clients without linking directly against the repo.
 
-- add an interactive REPL on top of `mdb query` for local exploration, or
-- move up the roadmap to server mode now that a query language exists
+Recommended scope:
 
-The engine substrate no longer blocks either direction.
+- single-process TCP server
+- line-oriented request / response protocol first, not Postgres wire protocol yet
+- reuse the existing mini-SQL executor
+- keep concurrency single-threaded until page-cache / row-index locking exists
 
 ### GPU Group By Performance
 

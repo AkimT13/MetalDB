@@ -138,6 +138,13 @@ int main() {
         e.insertTyped("/tmp/sql_cli", {ColValue(uint32_t(2)), ColValue(uint32_t(20))});
         const std::string out = captureCommand("./mdb query \"SELECT c0, c1 FROM '/tmp/sql_cli' WHERE c0 = 2\"");
         assert(out == "c0\tc1\n2\t20\n");
+
+        const std::string replOut = captureCommand(
+            "printf \".help\nSELECT c0,\n c1 FROM '/tmp/sql_cli' WHERE c0 = 2;\n.quit\n\" | ./mdb repl 2>&1"
+        );
+        assert(replOut.find("Mini-SQL REPL\n") != std::string::npos);
+        assert(replOut.find("Queries must end with ';'") != std::string::npos);
+        assert(replOut.find("c0\tc1\n2\t20\n") != std::string::npos);
     }
 
     std::remove("/tmp/sql_main.mdb");

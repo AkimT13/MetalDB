@@ -41,6 +41,7 @@ Python notes:
 The `mdb` CLI now has a one-shot SQL entrypoint:
 
 - `./mdb query "<sql>"`
+- `./mdb repl`
 
 Supported v1 query shape:
 - `SELECT c0, c1 FROM '/tmp/demo'`
@@ -55,6 +56,13 @@ Important v1 limits:
 - `GROUP BY ... WHERE ...` is not supported yet
 
 Output is tab-separated with a header row.
+
+REPL notes:
+- statements are executed when terminated by `;`
+- multiline queries are accepted until the terminating `;`
+- `.help` prints the built-in command summary
+- `.quit` exits the session
+- REPL execution uses the same mini-SQL executor as `mdb query`
 
 ---
 

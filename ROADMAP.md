@@ -2,7 +2,8 @@
 
 Current state: GPU-accelerated column-store. Supports UINT32 + STRING columns, insert/delete,
 equality/range/compound WHERE (AND/OR), groupby, hash join, persistence, and a small one-shot
-mini-SQL CLI query surface. Single-threaded, with C++, C, and internal Python (`ctypes`) APIs.
+mini-SQL CLI query surface plus a thin interactive REPL. Single-threaded, with C++, C, and
+internal Python (`ctypes`) APIs.
 
 ---
 
@@ -109,9 +110,14 @@ orphaned bytes from deleted rows. Required before STRING is safe for long-runnin
 Copy data files + WAL to backup location. Replay WAL from a checkpoint to a target LSN.
 Straightforward once WAL exists.
 
-### CLI / REPL
-Interactive `mdb` tool that opens a `.mdb` file and accepts queries. Hook already partially
-wired in the Makefile (`run-cli` target).
+### CLI / REPL  [DONE, v1]
+Interactive `mdb repl` now exists as a thin shell over mini-SQL execution:
+- prompt + continuation prompt
+- `;`-terminated statements
+- `.help`, `.quit`
+
+Still intentionally missing: history, editing, catalog/schema introspection, and pretty table
+rendering.
 
 ---
 

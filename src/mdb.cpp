@@ -11,6 +11,7 @@
 #include <vector>
 #include <optional>
 #include <iostream>
+#include <cctype>
 
 static void usage(const char* argv0) {
     std::fprintf(stderr,
@@ -20,8 +21,9 @@ static void usage(const char* argv0) {
         "  %s select-eq <file> <col> <val>\n"
         "  %s select-between <file> <col> <lo> <hi>\n"
         "  %s query <sql>\n"
+        "  %s repl\n"
         "  %s sum <file> <col>\n",
-        argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static bool parseU16(const char* s, uint16_t& out) {
@@ -40,6 +42,101 @@ static bool parseU32(const char* s, uint32_t& out) {
     return true;
 }
 
+static std::string trim(const std::string& input) {
+    size_t start = 0;
+    while (start < input.size() &&
+           std::isspace(static_cast<unsigned char>(input[start]))) ++start;
+    size_t end = input.size();
+    while (end > start &&
+           std::isspace(static_cast<unsigned char>(input[end - 1]))) --end;
+    return input.substr(start, end - start);
+}
+
+static void printQueryResult(const MiniSQLResult& result) {
+    for (size_t i = 0; i < result.headers.size(); ++i) {
+        if (i) std::printf("\t");
+        std::printf("%s", result.headers[i].c_str());
+    }
+    std::printf("\n");
+    for (const auto& row : result.rows) {
+        for (size_t i = 0; i < row.size(); ++i) {
+            if (i) std::printf("\t");
+            std::printf("%s", row[i].c_str());
+        }
+        std::printf("\n");
+    }
+}
+
+static bool executeAndPrintQuery(Engine& engine, const std::string& sql, bool replMode) {
+    try {
+        printQueryResult(executeMiniSQL(engine, sql));
+        return true;
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "%s error: %s\n", replMode ? "repl" : "query", ex.what());
+        return false;
+    }
+}
+
+static void printReplHelp() {
+    std::puts("Mini-SQL REPL");
+    std::puts(".help           show this help");
+    std::puts(".quit           exit the REPL");
+    std::puts("Queries must end with ';' and use the same syntax as `mdb query`.");
+}
+
+static bool findStatementTerminator(const std::string& input, size_t& pos) {
+    bool inString = false;
+    for (size_t i = 0; i < input.size(); ++i) {
+        const char ch = input[i];
+        if (ch == '\'') inString = !inString;
+        if (!inString && ch == ';') {
+            pos = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int runRepl() {
+    Engine engine;
+    std::string pending;
+    std::string line;
+    printReplHelp();
+    while (true) {
+        std::printf("%s", pending.empty() ? "mdb> " : "...> ");
+        std::fflush(stdout);
+        if (!std::getline(std::cin, line)) {
+            if (!pending.empty())
+                std::fprintf(stderr, "repl error: unterminated statement before EOF\n");
+            std::printf("\n");
+            return pending.empty() ? 0 : 1;
+        }
+
+        const std::string stripped = trim(line);
+        if (pending.empty() && stripped.empty()) continue;
+        if (pending.empty() && !stripped.empty() && stripped[0] == '.') {
+            if (stripped == ".quit") return 0;
+            if (stripped == ".help") {
+                printReplHelp();
+                continue;
+            }
+            std::fprintf(stderr, "repl error: unknown command: %s\n", stripped.c_str());
+            continue;
+        }
+
+        if (!pending.empty()) pending += '\n';
+        pending += line;
+
+        size_t termPos = 0;
+        while (findStatementTerminator(pending, termPos)) {
+            const std::string statement = trim(pending.substr(0, termPos));
+            pending.erase(0, termPos + 1);
+            pending = trim(pending);
+            if (!statement.empty()) (void)executeAndPrintQuery(engine, statement, true);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { usage(argv[0]); return 1; }
     std::string cmd = argv[1];
@@ -51,26 +148,13 @@ int main(int argc, char** argv) {
             sql += ' ';
             sql += argv[i];
         }
-        try {
-            Engine engine;
-            const auto result = executeMiniSQL(engine, sql);
-            for (size_t i = 0; i < result.headers.size(); ++i) {
-                if (i) std::printf("\t");
-                std::printf("%s", result.headers[i].c_str());
-            }
-            std::printf("\n");
-            for (const auto& row : result.rows) {
-                for (size_t i = 0; i < row.size(); ++i) {
-                    if (i) std::printf("\t");
-                    std::printf("%s", row[i].c_str());
-                }
-                std::printf("\n");
-            }
-            return 0;
-        } catch (const std::exception& ex) {
-            std::fprintf(stderr, "query error: %s\n", ex.what());
-            return 1;
-        }
+        Engine engine;
+        return executeAndPrintQuery(engine, sql, false) ? 0 : 1;
+    }
+
+    if (cmd == "repl") {
+        if (argc != 2) { usage(argv[0]); return 1; }
+        return runRepl();
     }
 
     if (cmd == "create") {
