@@ -1,6 +1,6 @@
 # MetalDB — Component Documentation
 
-> Last updated: 2026-04-04. For in-progress work and known issues see `PROGRESS.md`.
+> Last updated: 2026-04-08. For in-progress work and known issues see `PROGRESS.md`.
 
 ---
 
@@ -33,6 +33,9 @@ Python notes:
 - It expects `libmdb.dylib` either in `python/` or `src/`.
 - Reopened tables still require explicit schema registration via `Engine.open_table(name, col_types)`.
 - Wrapper-side validation raises `ValueError` for Python argument mistakes and `MdbError` for engine/C API failures.
+- Both C and Python now expose explicit table flush:
+  - C: `mdb_flush`
+  - Python: `Engine.flush(name)`
 
 ---
 
@@ -43,6 +46,7 @@ The `mdb` CLI now has a one-shot SQL entrypoint:
 - `./mdb query "<sql>"`
 - `./mdb repl`
 - `./mdb serve <port>`
+- `./mdb flush <table>`
 
 Supported v1 query shape:
 - `SELECT c0, c1 FROM '/tmp/demo'`
@@ -82,6 +86,12 @@ server> c0\tc1
 server> 2\t20
 server> END
 ```
+
+Flush notes:
+- each table also maintains a WAL sidecar at `<table>.mdb.wal`
+- inserts and deletes are written to WAL before base-file mutation
+- `./mdb flush <table>` forces WAL sync + base-file checkpoint + WAL truncation
+- the command accepts either a base path like `/tmp/demo` or `/tmp/demo.mdb`
 
 ---
 

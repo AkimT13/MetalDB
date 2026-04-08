@@ -98,6 +98,7 @@ int mdb_insert(MdbEngine* e, const char* table,
                const MdbValue* values, uint32_t num_cols, uint32_t* out_row_id);
 
 int mdb_delete(MdbEngine* e, const char* table, uint32_t row_id);
+int mdb_flush(MdbEngine* e, const char* table);
 
 /*
  * Fills out_values[0..num_cols-1].  For STRING columns out_values[i].str

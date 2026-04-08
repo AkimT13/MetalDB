@@ -147,13 +147,34 @@ int main() {
         assert(replOut.find("c0\tc1\n2\t20\n") != std::string::npos);
     }
 
+    {
+        Engine e;
+        e.createTypedTable("/tmp/sql_flush", {ColType::UINT32});
+        e.insertTyped("/tmp/sql_flush", {ColValue(uint32_t(77))});
+        const std::string out = captureCommand("./mdb flush /tmp/sql_flush");
+        assert(out == "flushed /tmp/sql_flush\n");
+    }
+    {
+        Engine e;
+        auto& t = e.openTable("/tmp/sql_flush");
+        auto row = t.fetchTypedRow(0);
+        assert(row.size() == 1);
+        assert(row[0] && row[0]->u32 == 77);
+    }
+
     std::remove("/tmp/sql_main.mdb");
     std::remove("/tmp/sql_main.mdb.idx");
+    std::remove("/tmp/sql_main.mdb.wal");
     std::remove("/tmp/sql_main.mdb.2.str");
     std::remove("/tmp/sql_typed.mdb");
     std::remove("/tmp/sql_typed.mdb.idx");
+    std::remove("/tmp/sql_typed.mdb.wal");
     std::remove("/tmp/sql_cli.mdb");
     std::remove("/tmp/sql_cli.mdb.idx");
+    std::remove("/tmp/sql_cli.mdb.wal");
+    std::remove("/tmp/sql_flush.mdb");
+    std::remove("/tmp/sql_flush.mdb.idx");
+    std::remove("/tmp/sql_flush.mdb.wal");
 
     std::puts("test_mini_sql: passed");
     return 0;

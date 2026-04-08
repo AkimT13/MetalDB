@@ -185,6 +185,17 @@ int mdb_delete(MdbEngine* e, const char* table, uint32_t row_id) {
       catch (...)                              { e->lastError = "unknown"; return MDB_ERR; }
 }
 
+int mdb_flush(MdbEngine* e, const char* table) {
+    if (!e || !table) return MDB_ERR_ARG;
+    try {
+        requireExistingTable(e, table).flushDurable();
+        clearLastError(e);
+        return MDB_OK;
+    } catch (const std::invalid_argument& ex) { e->lastError = ex.what(); return MDB_ERR_ARG; }
+      catch (const std::exception&         ex) { e->lastError = ex.what(); return MDB_ERR; }
+      catch (...)                              { e->lastError = "unknown"; return MDB_ERR; }
+}
+
 int mdb_fetch_row(MdbEngine* e, const char* table, uint32_t row_id,
                   MdbValue* out_values, uint32_t num_cols) {
     if (!e || !table || !out_values || num_cols == 0) return MDB_ERR_ARG;

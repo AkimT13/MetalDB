@@ -29,6 +29,10 @@ Table& Engine::openTable(const std::string& name) {
     return *p;
 }
 
+void Engine::flush(const std::string& name) {
+    openTable(name).flushDurable();
+}
+
 uint32_t Engine::insert(const std::string& name, const std::vector<ValueType>& row) {
     return openTable(name).insertRow(row);
 }

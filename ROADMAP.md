@@ -3,15 +3,19 @@
 Current state: GPU-accelerated column-store. Supports UINT32 + STRING columns, insert/delete,
 equality/range/compound WHERE (AND/OR), groupby, hash join, persistence, a small one-shot
 mini-SQL CLI query surface, a thin interactive REPL, and a minimal loopback TCP server.
-Single-threaded, with C++, C, and internal Python (`ctypes`) APIs.
+Single-threaded, with C++, C, and internal Python (`ctypes`) APIs. WAL-backed recovery and
+explicit flush/checkpoint are now in place.
 
 ---
 
 ## Correctness / Durability
 
-### WAL + Group Commit
-Replace per-insert `fsync` with a sequential write-ahead log. One `fsync` per commit batch.
-Enables atomic multi-row writes and crash recovery. Foundational for everything else.
+### WAL + Group Commit  [DONE, v1]
+Per-table WAL sidecar with committed insert/delete replay, explicit `flush`/checkpoint, and
+recovery on open is now implemented.
+
+Still intentionally missing: multi-statement transactions, background group-commit scheduling,
+and multi-table atomicity.
 
 ### MVCC (Multi-Version Concurrency Control)
 Keep old row versions instead of tombstoning. Readers never block writers. Required for snapshot
@@ -63,15 +67,14 @@ workflows (pandas interop, Jupyter notebooks) without a network round-trip or qu
 Parser for `SELECT col FROM table WHERE ... GROUP BY ...`. No subqueries or CTEs needed to
 cover 80% of analytical queries. Makes the engine usable without writing C++.
 
-### Networking / Server Mode  [DONE, v1 LINE PROTOCOL]
+### Networking / Server Mode  [NEXT: POSTGRES WIRE]
 `mdb serve <port>` now exposes the mini-SQL executor over a simple loopback TCP server:
 - one request per line
 - response framed with `END`
 - `OK` or `ERR\t...` status
 - `.quit` closes a client session cleanly
 
-Still intentionally missing: Postgres wire compatibility, auth, concurrency, and durable
-server-oriented write semantics.
+Still intentionally missing: Postgres wire compatibility, auth, and concurrency.
 
 ---
 

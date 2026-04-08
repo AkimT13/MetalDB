@@ -139,6 +139,9 @@ _lib.mdb_insert.argtypes = [
 _lib.mdb_delete.restype  = ctypes.c_int
 _lib.mdb_delete.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
 
+_lib.mdb_flush.restype  = ctypes.c_int
+_lib.mdb_flush.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
 _lib.mdb_fetch_row.restype  = ctypes.c_int
 _lib.mdb_fetch_row.argtypes = [
     ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32,
@@ -510,6 +513,11 @@ class Engine:
         table_b = _encode_name(table)
         _check(_lib.mdb_delete(
             self._h, table_b, ctypes.c_uint32(row_id)), self._h)
+
+    def flush(self, table: str) -> None:
+        _require_open_handle(self._h)
+        table_b = _encode_name(table)
+        _check(_lib.mdb_flush(self._h, table_b), self._h)
 
     def fetch_row(self, table: str, row_id: int) -> list:
         """Return a list of Python values for the given row."""

@@ -14,6 +14,7 @@
 #include <optional>
 #include <iostream>
 #include <cctype>
+#include <unistd.h>
 
 static void usage(const char* argv0) {
     std::fprintf(stderr,
@@ -25,8 +26,9 @@ static void usage(const char* argv0) {
         "  %s query <sql>\n"
         "  %s repl\n"
         "  %s serve <port>\n"
+        "  %s flush <table>\n"
         "  %s sum <file> <col>\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static bool parseU16(const char* s, uint16_t& out) {
@@ -43,6 +45,12 @@ static bool parseU32(const char* s, uint32_t& out) {
     if (!s[0] || (end && *end) || v > 0xFFFFFFFFul) return false;
     out = static_cast<uint32_t>(v);
     return true;
+}
+
+static std::string toBaseTableName(const std::string& name) {
+    if (name.size() >= 4 && name.substr(name.size() - 4) == ".mdb")
+        return name.substr(0, name.size() - 4);
+    return name;
 }
 
 static std::string trim(const std::string& input) {
@@ -143,6 +151,25 @@ int main(int argc, char** argv) {
             return 1;
         }
         return runServer(port);
+    }
+
+    if (cmd == "flush") {
+        if (argc != 3) { usage(argv[0]); return 1; }
+        const std::string baseName = toBaseTableName(argv[2]);
+        const std::string path = baseName + ".mdb";
+        if (::access(path.c_str(), F_OK) != 0) {
+            std::fprintf(stderr, "flush error: table file does not exist\n");
+            return 1;
+        }
+        try {
+            Engine engine;
+            engine.flush(baseName);
+            std::printf("flushed %s\n", baseName.c_str());
+            return 0;
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "flush error: %s\n", ex.what());
+            return 1;
+        }
     }
 
     if (cmd == "create") {

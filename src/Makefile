@@ -145,10 +145,10 @@ fast: $(TESTS)
 clean:
 	rm -f $(OBJS) $(DEPS) $(TESTS) mdb mdb.o libmdb.a libmdb.dylib
 	rm -f $(METALLIB_SRCS) $(METAL_SRCS:.metal=.air)
-	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx *.mdb *.mdb.idx *.str
-	rm -f /tmp/c_*.mdb /tmp/c_*.mdb.idx /tmp/c_*.str
-	rm -f /tmp/py_*.mdb /tmp/py_*.mdb.idx /tmp/py_*.str
-	rm -f /tmp/sql_*.mdb /tmp/sql_*.mdb.idx /tmp/sql_*.str
+	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx /tmp/demo.mdb.wal *.mdb *.mdb.idx *.wal *.str
+	rm -f /tmp/c_*.mdb /tmp/c_*.mdb.idx /tmp/c_*.mdb.wal /tmp/c_*.str
+	rm -f /tmp/py_*.mdb /tmp/py_*.mdb.idx /tmp/py_*.mdb.wal /tmp/py_*.str
+	rm -f /tmp/sql_*.mdb /tmp/sql_*.mdb.idx /tmp/sql_*.mdb.wal /tmp/sql_*.str
 	rm -f /tmp/wal_*.mdb /tmp/wal_*.mdb.idx /tmp/wal_*.str /tmp/wal_*.wal
 
 # Include dependency files (safe if missing)

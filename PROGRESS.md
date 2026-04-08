@@ -193,43 +193,53 @@ sandbox on this machine.
 
 ---
 
+### Phase 8 — WAL + Group Commit (complete, v1 per-table durability)
+
+Added a per-table WAL sidecar at `<table>.mdb.wal` and moved the durable checkpoint boundary
+up to the table layer.
+
+Current v1 behavior:
+
+- WAL records for `insert` and `delete`, each followed by a commit marker
+- recovery on table open with trailing partial or bad-checksum records ignored
+- replayed operations checkpointed back into base files, then WAL truncated to header
+- low-level per-write `fsync` removed from `ColumnFile` and `RowIndex`
+- explicit durable checkpoint via `Table::flushDurable()` / `Engine::flush()`
+- public flush surfaces added to:
+  - CLI: `mdb flush <table>`
+  - C API: `mdb_flush`
+  - Python: `Engine.flush(name)`
+
+Coverage:
+
+- dedicated recovery/corruption test in `test_wal`
+- CLI flush coverage in `test_mini_sql`
+- C API flush/reopen coverage in `test_c_api`
+- Python flush/reopen coverage in `python/test_mdb.py`
+- server regression still green with WAL-enabled table open/recovery path
+
+Verified:
+
+- `make -C src fast TEST=test_wal`
+- `make -C src fast TEST=test_c_api`
+- `make -C src fast TEST=test_mini_sql`
+- `make -C src test-python`
+
+---
+
 ## Known Issues / Next Work
 
-### Phase 8 — WAL + Group Commit (in progress)
+### Next Logical Step — Postgres Wire Compatibility
 
-Core WAL plumbing is now in place under `src/Wal.cpp` and integrated into `Table`.
-Current state of the implementation:
-
-- per-table WAL sidecar at `<table>.mdb.wal`
-- WAL records for `insert` and `delete`, each followed by a commit marker
-- recovery on table open with trailing partial / bad-checksum records ignored
-- replayed operations checkpointed back into base files and WAL truncated to header
-- low-level per-write `fsync` removed from `ColumnFile` and `RowIndex`
-- explicit `Table::flushDurable()` added as the durable checkpoint boundary
-
-Coverage so far:
-
-- dedicated recovery and corruption-tail test in `test_wal`
-- regressions still green in `test_engine`, `test_mini_sql`, and `test_server`
-
-Remaining work in this phase:
-
-- expose `flush` through `Engine`, CLI, C API, and Python
-- add C/Python durability tests
-- update roadmap/docs after the public surface is complete
-
-### Next Logical Usability Step — Postgres Wire Or WAL
-
-The local and minimal remote usability surfaces are now present: C API, internal Python
-bindings, one-shot mini-SQL, REPL, and a loopback TCP server. The next decision is whether to:
-
-- move the server toward real client compatibility with a Postgres wire subset, or
-- shift to durability work (WAL + group commit) before making long-running server usage a goal
+The storage layer now has a basic durability story, and the existing server is no longer
+purely ephemeral. The next logical step is moving the network surface toward real client
+compatibility with a small Postgres wire subset.
 
 Recommended scope:
 
-- Postgres-wire path: authentication-free local prototype, simple query messages only
-- WAL path: durable inserts and crash recovery before broadening server expectations
+- authentication-free local prototype first
+- simple query message path only
+- map query results onto the existing mini-SQL executor
 - keep concurrency single-threaded until page-cache / row-index locking exists
 
 ### GPU Group By Performance

@@ -15,6 +15,7 @@ public:
                             const std::vector<ColType>& colTypes,
                             uint16_t pageSize = 4096);
     Table& openTable(const std::string& name);
+    void flush(const std::string& name);
 
     uint32_t insert(const std::string& name, const std::vector<ValueType>& row);
     uint32_t insertTyped(const std::string& name, const std::vector<ColValue>& row);

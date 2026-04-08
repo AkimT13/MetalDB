@@ -156,6 +156,19 @@ def test_delete():
         check_eq(len(e.scan_eq("/tmp/py_del", 0, 77)), 0)
     print("PASS test_delete")
 
+def test_flush_reopen():
+    with Engine() as e:
+        e.create_table("/tmp/py_flush", [UINT32, STRING])
+        rid = e.insert("/tmp/py_flush", [88, "durable"])
+        e.flush("/tmp/py_flush")
+
+    with Engine() as e:
+        e.open_table("/tmp/py_flush", [UINT32, STRING])
+        row = e.fetch_row("/tmp/py_flush", rid)
+        check_eq(row[0], 88)
+        check_eq(row[1], "durable")
+    print("PASS test_flush_reopen")
+
 def test_aggregations():
     with Engine() as e:
         e.create_table("/tmp/py_agg", [UINT32])
@@ -265,6 +278,7 @@ if __name__ == "__main__":
     test_where_and_or()
     test_where_string_predicate()
     test_delete()
+    test_flush_reopen()
     test_aggregations()
     test_groupby()
     test_join()

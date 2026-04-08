@@ -238,6 +238,32 @@ static void test_delete(void) {
     printf("PASS test_delete\n");
 }
 
+static void test_flush_reopen(void) {
+    MdbEngine* e = mdb_open();
+    CHECK(e != NULL);
+
+    MdbColType types[] = { MDB_UINT32, MDB_STRING };
+    CHECK(mdb_create_table(e, "/tmp/c_flush", types, 2) == MDB_OK);
+
+    MdbValue row[2];
+    row[0] = uint32_val(123);
+    row[1] = string_val("durable");
+    uint32_t rid = 0;
+    CHECK(mdb_insert(e, "/tmp/c_flush", row, 2, &rid) == MDB_OK);
+    CHECK(mdb_flush(e, "/tmp/c_flush") == MDB_OK);
+    mdb_close(e);
+
+    e = mdb_open();
+    CHECK(e != NULL);
+    MdbValue out[2];
+    CHECK(mdb_fetch_row(e, "/tmp/c_flush", rid, out, 2) == MDB_OK);
+    CHECK(out[0].type == MDB_UINT32 && out[0].u32 == 123);
+    CHECK(out[1].type == MDB_STRING && out[1].str != NULL);
+    CHECK(strcmp(out[1].str, "durable") == 0);
+    mdb_close(e);
+    printf("PASS test_flush_reopen\n");
+}
+
 static void test_groupby(void) {
     MdbEngine* e = mdb_open();
     CHECK(e != NULL);
@@ -472,6 +498,7 @@ int main(void) {
     test_scan_string();
     test_where_and_or();
     test_delete();
+    test_flush_reopen();
     test_groupby();
     test_join();
     test_null_safety();
