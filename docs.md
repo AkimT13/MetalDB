@@ -50,10 +50,17 @@ The `mdb` CLI now has a one-shot SQL entrypoint:
 
 Supported query shape:
 - `SELECT c0, c1 FROM '/tmp/demo'`
-- optional flat `WHERE` with all `AND` or all `OR`
-  - numeric `=`, `<`, `<=`, `>`, `>=`, `BETWEEN lo AND hi` (UINT32 columns)
-  - string `=` (STRING columns)
-- optional scalar aggregates `COUNT(*)`, `SUM(cN)`, `MIN(cN)`, `MAX(cN)`, `AVG(cN)`
+- optional `WHERE` boolean expression:
+  - comparisons `=`, `!=` / `<>`, `<`, `<=`, `>`, `>=` on every column type
+    (numeric literals for numeric columns, string literals for STRING columns;
+    strings compare byte-wise)
+  - `cN [NOT] BETWEEN a AND b`, `cN [NOT] IN (v1, v2, ...)`
+  - `AND`, `OR`, `NOT`, and parentheses with standard precedence (NOT > AND > OR)
+  - UINT32 `=` / range leaves use the zone-map-pruned hybrid GPU/CPU scans; other
+    leaves are CPU scans combined with sorted row-ID set algebra
+  - `-- comments` are ignored
+- optional scalar aggregates `COUNT(*)`, `COUNT(cN)`, `SUM(cN)`, `MIN(cN)`, `MAX(cN)`,
+  `AVG(cN)` — several per query; `MIN` / `MAX` also work on STRING columns
 - optional `GROUP BY cN` with exactly one aggregate expression
 - optional `ORDER BY key [ASC|DESC] [, ...]` where `key` is a selected column, a selected
   aggregate (`count(*)`, `sum(c1)`, ...) or a 1-based output position
@@ -73,7 +80,7 @@ Write / catalog statements:
 Important limits:
 - table references are quoted base paths, not catalog names
 - columns are synthetic identifiers `c0`, `c1`, ...
-- mixed `AND` / `OR`, `!=` / `<>`, joins, aliases, parentheses, subqueries, and CTEs are not supported
+- joins, aliases, arithmetic expressions, subqueries, and CTEs are not supported
 - `ORDER BY` keys must appear in the `SELECT` list
 - `GROUP BY ... WHERE ...` is not supported yet
 - no `UPDATE` yet (see ROADMAP)
