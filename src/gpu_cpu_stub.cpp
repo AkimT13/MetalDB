@@ -22,6 +22,8 @@ extern "C" std::vector<uint32_t> gpuScanBetween(const std::vector<uint32_t>&, co
     return {};
 }
 
+bool gpuSumU32Checked(const std::vector<uint32_t>&, uint64_t&) { return false; }
+
 uint64_t gpuSumU32(const std::vector<uint32_t>& values) {
     uint64_t acc = 0;
     for (uint32_t v : values) acc += v;

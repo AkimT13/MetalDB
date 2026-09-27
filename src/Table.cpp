@@ -596,22 +596,17 @@ std::vector<uint32_t> Table::scanEqualsString(uint16_t colIdx, const std::string
     return rowIDs;
 }
 
-// gpu_sum host entry
-uint64_t gpuSumU32(const std::vector<uint32_t>& values);
+// gpu_sum host entry (gpu_sum.mm / gpu_cpu_stub.cpp)
+bool gpuSumU32Checked(const std::vector<uint32_t>& values, uint64_t& result);
 
-
-// Hybrid sum: CPU for small, GPU for large when available
-ValueType Table::sumColumnHybrid(uint16_t colIdx) {
+uint64_t Table::sumColumn64(uint16_t colIdx) {
     assert(colIdx < cols_.size());
-
     auto vals = materializeColumn(colIdx);
-    const size_t n = vals.size();
-    if (!useGPU_ || n < gpuThreshold_ || !metalIsAvailable()) {
-        uint64_t acc = 0;
-        for (auto v : vals) acc += v;
-        return static_cast<ValueType>(acc);
+    if (useGPU_ && vals.size() >= gpuThreshold_ && metalIsAvailable()) {
+        uint64_t s = 0;
+        if (gpuSumU32Checked(vals, s)) return s;
     }
-
-    uint64_t s = gpuSumU32(vals);
-    return static_cast<ValueType>(s);
+    uint64_t acc = 0;
+    for (auto v : vals) acc += v;
+    return acc;
 }

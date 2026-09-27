@@ -3,11 +3,11 @@
 
 extern "C" bool metalIsAvailable();
 
-// Choose a hash-table size: next power-of-two >= 4 * distinct keys estimate.
-// We use 4× the row count as a conservative upper bound (all keys distinct).
+// Initial GPU hash-table size hint; gpuGroupByCountSum grows it on overflow, so
+// this only needs to be cheap for the common low-cardinality case.
 static uint32_t chooseBuckets(size_t n) {
-    uint32_t b = 1u;
-    while (b < uint32_t(n) * 4u) b <<= 1u;
+    uint32_t b = 1024u;
+    while (b < (1u << 16) && uint64_t(b) < uint64_t(n) * 2u) b <<= 1u;
     return b;
 }
 

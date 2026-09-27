@@ -249,12 +249,46 @@ std::optional<ValueType> ColumnFile::fetchSlot(uint32_t id) {
 
 // ── Typed API ────────────────────────────────────────────────────────────────
 
+ColumnPage& ColumnFile::cachedPage(uint16_t pid) {
+    auto it = pageCache_.find(pid);
+    if (it == pageCache_.end()) {
+        loadPage(pid);  // populates pageCache_
+        it = pageCache_.find(pid);
+    }
+    return it->second;
+}
+
+void ColumnFile::writeHeader(const ColumnPage& page) {
+    DiskPageHeader hdr{};
+    hdr.pageID       = page.pageID;
+    hdr.capacity     = page.capacity;
+    hdr.count        = page.count;
+    hdr.nextFreePage = page.nextFreePage;
+    hdr.minValue     = static_cast<uint32_t>(page.minValue);
+    hdr.maxValue     = static_cast<uint32_t>(page.maxValue);
+    const off_t base = off_t(page.pageID) * off_t(pageSize_);
+    if (pwrite(fd_, &hdr, sizeof(hdr), base) != ssize_t(sizeof(hdr)))
+        throw std::runtime_error(std::string("ColumnFile: header write failed: ") + std::strerror(errno));
+}
+
+void ColumnFile::writeSlot(const ColumnPage& page, uint16_t slot) {
+    const off_t base      = off_t(page.pageID) * off_t(pageSize_);
+    const off_t valuesOff = base + off_t(sizeof(DiskPageHeader));
+    const off_t valueOff  = valuesOff + off_t(slot) * valueBytes_;
+    if (pwrite(fd_, page.rawValues.data() + size_t(slot) * valueBytes_, valueBytes_, valueOff) != ssize_t(valueBytes_))
+        throw std::runtime_error(std::string("ColumnFile: value write failed: ") + std::strerror(errno));
+    const uint8_t used = page.tombstone[slot] ? 1u : 0u;
+    const off_t tombOff = valuesOff + off_t(page.capacity) * valueBytes_ + slot;
+    if (pwrite(fd_, &used, 1, tombOff) != 1)
+        throw std::runtime_error(std::string("ColumnFile: tombstone write failed: ") + std::strerror(errno));
+}
+
 uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
     const uint16_t pid = allocateOrFetchPage();
 
-    ColumnPage page = loadPage(pid);
+    ColumnPage& page = cachedPage(pid);
     int16_t slot = page.findFreeSlot();
-    assert(slot >= 0);
+    if (slot < 0) throw std::runtime_error("ColumnFile: free-list page has no free slot (run `mdb verify`)");
 
     // Write the right number of bytes based on colType_
     switch (colType_) {
@@ -278,13 +312,23 @@ uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
     }
     page.markUsed(slot);
 
+    // Widen the zone map incrementally (same raw-bytes-as-int64 view that
+    // ColumnPage::recomputeMinMax uses).
+    int64_t v64 = 0;
+    std::memcpy(&v64, page.rawValues.data() + size_t(slot) * valueBytes_, valueBytes_);
+    if (page.count == 1 || v64 < page.minValue64) page.minValue64 = v64;
+    if (page.count == 1 || v64 > page.maxValue64) page.maxValue64 = v64;
+    page.minValue = static_cast<ValueType>(page.minValue64);
+    page.maxValue = static_cast<ValueType>(page.maxValue64);
+
     // Page just filled up: pop it off this column's free-page list.
     if (page.count == page.capacity) {
         setHeadPageID(page.nextFreePage);
         page.nextFreePage = UINT16_MAX;
         flushMaster();
     }
-    flushPage(page);
+    writeSlot(page, static_cast<uint16_t>(slot));
+    writeHeader(page);
     return (uint32_t(pid) << 16) | uint32_t(slot);
 }
 
@@ -323,7 +367,7 @@ std::optional<ColValue> ColumnFile::fetchTypedSlot(uint32_t id) const {
 void ColumnFile::deleteSlot(uint32_t id) {
     const uint16_t pid  = pageIdFromSlotId(id);
     const uint16_t slot = slotIdxFromSlotId(id);
-    ColumnPage page = loadPage(pid);
+    ColumnPage& page = cachedPage(pid);
     if (slot >= page.capacity) return;
 
     // For STRING columns the heap bytes are orphaned on deletion (no compaction).
@@ -338,7 +382,11 @@ void ColumnFile::deleteSlot(uint32_t id) {
         setHeadPageID(pid);
         flushMaster();
     }
-    flushPage(page);
+    // Keep zone maps tight after deletes (CPU-only rescan; wider would still be
+    // correct, just prune less).
+    page.recomputeMinMax();
+    writeSlot(page, slot);
+    writeHeader(page);
 }
 
 void ColumnFile::flushMaster() {

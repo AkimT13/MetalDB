@@ -97,8 +97,11 @@ public:
     // CPU-only sum (you already had this)
     ValueType sumColumn(uint16_t colIdx);
 
-    // Hybrid sum (CPU for small / no-GPU; GPU for large)
-    ValueType sumColumnHybrid(uint16_t colIdx);
+    // Hybrid sum (CPU for small / no-GPU; GPU for large), exact 64-bit. Falls
+    // back to the CPU if the GPU path fails.
+    uint64_t sumColumn64(uint16_t colIdx);
+    // Legacy: truncated to 32 bits (kept for the original C API / tests).
+    ValueType sumColumnHybrid(uint16_t colIdx) { return static_cast<ValueType>(sumColumn64(colIdx)); }
 
     // Min/max via zone-map metadata (header-only reads)
     ValueType minColumn(uint16_t colIdx);

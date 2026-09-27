@@ -467,6 +467,41 @@ auth success / failure, Terminate).
 
 ---
 
+### GPU Correctness Fixes + Insert Write Amplification (complete — Metal paths need `make run` on Apple Silicon)
+
+Reviewed every Metal kernel and host wrapper; fixed:
+
+- **GPU GROUP BY sums wrapped at 2^32 per group.** The kernel now accumulates each sum
+  as a (lo, hi) pair of 32-bit atomics: `atomic_fetch_add` returns the prior value, so
+  `old + v < old` identifies exactly the adds that wrap `lo`, and each carries one into
+  `hi` — exact regardless of thread interleaving (Metal has no 64-bit device atomics).
+- **Key `0xFFFFFFFF` collided with the kernel's empty-slot sentinel.** Those rows are now
+  aggregated on the CPU and merged; everything else still runs on the GPU.
+- **Rows silently dropped when the GPU hash table filled up** (probe loop exhausted).
+  The kernel now raises an overflow flag after 128 probes; the host re-runs with 8× the
+  buckets (up to 2× rows, always sufficient). Initial table: 1024–65536 buckets instead
+  of 4× rows, which also removes a `uint32_t(n) * 4` overflow / infinite loop for n ≥ 2^30.
+- **`gpuSumU32` returned 0 on any Metal failure**, indistinguishable from a real zero,
+  so `sumColumnHybrid` silently returned 0. New `gpuSumU32Checked` reports failure and
+  `Table::sumColumn64` falls back to the CPU. Command-buffer status is now checked.
+- The sum reduction assumed a power-of-two threadgroup size; it is now forced to one.
+- `Table::sumColumn64` exposes the exact 64-bit sum (`sumColumnHybrid` kept as the
+  legacy truncating API); `mdb sum` prints 64-bit.
+
+Also found while profiling the GPU test: every insert copied the whole page twice,
+re-scanned it for the zone map, and rewrote all values and tombstones (O(page size)
+CPU + I/O per row — 32 KiB written per 2-column row at 16 KiB pages). Inserts and
+deletes now mutate the cached page in place, maintain zone maps incrementally, and
+write only the 16-byte header, the slot's value, and its tombstone byte. On-disk format
+unchanged. `test_gpu_groupby` went from 9.3 s to 1.7 s.
+
+Coverage: `test_gpu_groupby` (GPU vs CPU vs independently computed expectations):
+per-group sums ≫ 2^32, the sentinel key, 100k distinct keys (forces the overflow
+retry), deleted rows, whole-column 64-bit sum. Passes CPU-only here; **run
+`make run` on a Mac to exercise the Metal kernels.**
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Steps
@@ -529,11 +564,9 @@ Measured on `test_groupby` (100k rows, 10 keys):
 | Before (phase c) | ~105ms | ~58ms |
 | After page-cache optimization | ~69ms | ~35ms |
 
-### 32-bit Sum Overflow in GPU Path
-`bucketSums` uses `device atomic_uint` (32-bit). Per-group sums overflow if they exceed
-~4.29 billion. Metal does not support `atomic_fetch_add` on `device atomic_ulong` (64-bit)
-on current Apple GPUs. Options: use two 32-bit accumulators (hi + lo), or use a
-non-atomic reduction pass for sums.
+### 32-bit Sum Overflow in GPU Path — FIXED
+Per-group sums now use (lo, hi) 32-bit atomic pairs with carry propagation in
+`gpu_groupby.metal`; see "GPU Correctness Fixes" above.
 
 ### Deferred: String Column Support
 Variable-length storage requires a separate heap file and indirection pointers.
