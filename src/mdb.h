@@ -142,8 +142,30 @@ MdbJoinResult* mdb_join(MdbEngine* e,
                         const char* left,  uint16_t left_col,
                         const char* right, uint16_t right_col);
 
+/* ── 64-bit aggregates ────────────────────────────────────────────────────── */
+/* Exact sum (mdb_sum truncates to 32 bits and is kept for compatibility). */
+int mdb_sum64(MdbEngine* e, const char* table, uint16_t col, uint64_t* out);
+
+/* ── SQL ──────────────────────────────────────────────────────────────────── */
+/*
+ * Executes one mini-SQL statement (SELECT / INSERT / UPDATE / DELETE / CREATE
+ * TABLE / COPY / DESCRIBE / EXPLAIN). Returns NULL on error (see
+ * mdb_last_error). Values are returned as text; mdb_result_column_type reports
+ * each column's logical type (an MdbColType) so callers can convert.
+ * Write statements return one INT64 column "rows_affected".
+ */
+typedef struct MdbQueryResult MdbQueryResult;
+
+MdbQueryResult* mdb_query(MdbEngine* e, const char* sql);
+uint32_t    mdb_result_column_count(const MdbQueryResult* r);
+uint64_t    mdb_result_row_count   (const MdbQueryResult* r);
+const char* mdb_result_column_name (const MdbQueryResult* r, uint32_t col);  /* NULL if out of range */
+int         mdb_result_column_type (const MdbQueryResult* r, uint32_t col);  /* -1 if out of range */
+const char* mdb_result_value       (const MdbQueryResult* r, uint64_t row, uint32_t col); /* NULL if out of range */
+
 /* ── Free ─────────────────────────────────────────────────────────────────── */
 /* All free functions are safe to call with NULL. */
+void mdb_free_result(MdbQueryResult*);
 void mdb_free_rows  (MdbRowSet*);
 void mdb_free_group (MdbGroupResult*);
 void mdb_free_groupf(MdbGroupResultF*);

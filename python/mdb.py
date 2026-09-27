@@ -13,6 +13,9 @@ Quick start::
         print(e.scan_eq("/tmp/demo", 0, 42))   # [0]
         print(e.fetch_row("/tmp/demo", rid))   # [42, 'hello']
 
+        r = e.query("SELECT c1, count(*) FROM '/tmp/demo' GROUP BY c1")
+        print(r.columns, r.rows)               # ['c1', 'count(*)'] [('hello', 1)]
+
 Thread safety: Engine is NOT thread-safe.  Use one Engine per thread or
 provide external locking.
 """
@@ -29,12 +32,15 @@ def _find_lib() -> str:
     candidates = [
         here / "libmdb.dylib",
         here.parent / "src" / "libmdb.dylib",
+        here / "libmdb.so",                               # Linux / CPU-only build
+        here.parent / "src" / "build-cpu" / "libmdb.so",
     ]
     for p in candidates:
         if p.exists():
             return str(p)
     raise FileNotFoundError(
-        "libmdb.dylib not found.  Run `make libmdb.dylib` inside the src/ directory."
+        "libmdb not found.  Run `make libmdb.dylib` (macOS) or `make cpu` (portable) "
+        "inside the src/ directory."
     )
 
 _lib = ctypes.CDLL(_find_lib())
@@ -181,6 +187,27 @@ _lib.mdb_sum.argtypes = [
     ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint16,
     ctypes.POINTER(ctypes.c_uint32),
 ]
+
+_lib.mdb_sum64.restype  = ctypes.c_int
+_lib.mdb_sum64.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint16,
+    ctypes.POINTER(ctypes.c_uint64),
+]
+
+_lib.mdb_query.restype  = ctypes.c_void_p
+_lib.mdb_query.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.mdb_result_column_count.restype  = ctypes.c_uint32
+_lib.mdb_result_column_count.argtypes = [ctypes.c_void_p]
+_lib.mdb_result_row_count.restype  = ctypes.c_uint64
+_lib.mdb_result_row_count.argtypes = [ctypes.c_void_p]
+_lib.mdb_result_column_name.restype  = ctypes.c_char_p
+_lib.mdb_result_column_name.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+_lib.mdb_result_column_type.restype  = ctypes.c_int
+_lib.mdb_result_column_type.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+_lib.mdb_result_value.restype  = ctypes.c_char_p
+_lib.mdb_result_value.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
+_lib.mdb_free_result.restype  = None
+_lib.mdb_free_result.argtypes = [ctypes.c_void_p]
 
 _lib.mdb_min.restype  = ctypes.c_int
 _lib.mdb_min.argtypes = [
@@ -436,6 +463,33 @@ class Predicate:
 
 # ── Exceptions ─────────────────────────────────────────────────────────────────
 
+class QueryResult:
+    """Result of Engine.query(): column names, logical column types, and rows as
+    tuples of Python values (int / float / str). Iterable and sized like its rows."""
+
+    def __init__(self, columns: List[str], types: List[int], rows: List[tuple]):
+        self.columns = columns
+        self.types = types
+        self.rows = rows
+
+    def __iter__(self):
+        return iter(self.rows)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __repr__(self) -> str:
+        return f"QueryResult(columns={self.columns!r}, rows={len(self.rows)})"
+
+
+def _convert_cell(text: str, col_type: int):
+    if col_type in (UINT32, INT64):
+        return int(text) if text != "" else None
+    if col_type in (FLOAT, DOUBLE):
+        return float(text) if text != "" else None
+    return text
+
+
 class MdbError(RuntimeError):
     """Raised when a MetalDB operation fails."""
 
@@ -598,14 +652,43 @@ class Engine:
     # ── Aggregations ───────────────────────────────────────────────────────────
 
     def sum(self, table: str, col: int) -> int:
+        """Exact 64-bit sum of a UINT32 column."""
         _require_open_handle(self._h)
         table_b = _encode_name(table)
         col = _normalize_col_index(col)
-        out = ctypes.c_uint32(0)
-        _check(_lib.mdb_sum(
+        out = ctypes.c_uint64(0)
+        _check(_lib.mdb_sum64(
             self._h, table_b, ctypes.c_uint16(col),
             ctypes.byref(out)), self._h)
         return out.value
+
+    # ── SQL ──────────────────────────────────────────────────────────────────
+
+    def query(self, sql: str) -> QueryResult:
+        """Runs one mini-SQL statement and returns its typed result.
+
+        Values are converted by column type (ints, floats, str). Write statements
+        return a single ``rows_affected`` column. Raises MdbError on failure.
+        """
+        _require_open_handle(self._h)
+        if not isinstance(sql, str):
+            raise ValueError("sql must be a str")
+        res = _lib.mdb_query(self._h, sql.encode("utf-8"))
+        if not res:
+            raise MdbError(_last_error_msg(self._h))
+        try:
+            ncols = _lib.mdb_result_column_count(res)
+            nrows = _lib.mdb_result_row_count(res)
+            columns = [_lib.mdb_result_column_name(res, c).decode("utf-8") for c in range(ncols)]
+            types = [_lib.mdb_result_column_type(res, c) for c in range(ncols)]
+            rows = []
+            for r in range(nrows):
+                rows.append(tuple(
+                    _convert_cell(_lib.mdb_result_value(res, r, c).decode("utf-8"), types[c])
+                    for c in range(ncols)))
+            return QueryResult(columns, types, rows)
+        finally:
+            _lib.mdb_free_result(res)
 
     def min(self, table: str, col: int) -> int:
         _require_open_handle(self._h)

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "Engine.hpp"
+#include "MiniSQL.hpp"
 #include "Predicate.hpp"
 #include "ValueTypes.hpp"
 
@@ -320,6 +321,62 @@ int mdb_sum(MdbEngine* e, const char* table, uint16_t col, uint32_t* out) {
       catch (const std::exception&         ex) { e->lastError = ex.what(); return MDB_ERR; }
       catch (...)                              { e->lastError = "unknown"; return MDB_ERR; }
 }
+
+int mdb_sum64(MdbEngine* e, const char* table, uint16_t col, uint64_t* out) {
+    if (!e || !table || !out) return MDB_ERR_ARG;
+    try {
+        Table& t = requireExistingTable(e, table);
+        requireValidColumnIndex(t, col);
+        *out = t.sumColumn64(col);
+        clearLastError(e);
+        return MDB_OK;
+    } catch (const std::invalid_argument& ex) { e->lastError = ex.what(); return MDB_ERR_ARG; }
+      catch (const std::exception&         ex) { e->lastError = ex.what(); return MDB_ERR; }
+      catch (...)                              { e->lastError = "unknown"; return MDB_ERR; }
+}
+
+// ── SQL ────────────────────────────────────────────────────────────────────────
+
+struct MdbQueryResult {
+    MiniSQLResult result;
+};
+
+MdbQueryResult* mdb_query(MdbEngine* e, const char* sql) {
+    if (!e) return nullptr;
+    if (!sql) { e->lastError = "sql must not be NULL"; return nullptr; }
+    try {
+        auto* r = new MdbQueryResult{executeMiniSQL(e->engine, sql)};
+        clearLastError(e);
+        return r;
+    } catch (const std::bad_alloc&)     { e->lastError = "out of memory"; return nullptr; }
+      catch (const std::exception& ex)  { e->lastError = ex.what(); return nullptr; }
+      catch (...)                       { e->lastError = "unknown"; return nullptr; }
+}
+
+uint32_t mdb_result_column_count(const MdbQueryResult* r) {
+    return r ? static_cast<uint32_t>(r->result.headers.size()) : 0;
+}
+
+uint64_t mdb_result_row_count(const MdbQueryResult* r) {
+    return r ? static_cast<uint64_t>(r->result.rows.size()) : 0;
+}
+
+const char* mdb_result_column_name(const MdbQueryResult* r, uint32_t col) {
+    if (!r || col >= r->result.headers.size()) return nullptr;
+    return r->result.headers[col].c_str();
+}
+
+int mdb_result_column_type(const MdbQueryResult* r, uint32_t col) {
+    if (!r || col >= r->result.types.size()) return -1;
+    return static_cast<int>(r->result.types[col]);
+}
+
+const char* mdb_result_value(const MdbQueryResult* r, uint64_t row, uint32_t col) {
+    if (!r || row >= r->result.rows.size() || col >= r->result.rows[row].size()) return nullptr;
+    return r->result.rows[row][col].c_str();
+}
+
+void mdb_free_result(MdbQueryResult* r) { delete r; }
 
 int mdb_min(MdbEngine* e, const char* table, uint16_t col, uint32_t* out) {
     if (!e || !table || !out) return MDB_ERR_ARG;

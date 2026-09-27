@@ -266,6 +266,42 @@ def test_schema_not_registered():
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
+def test_sql_query():
+    import os as _os
+    for ext in (".mdb", ".mdb.idx", ".mdb.wal", ".mdb.1.str"):
+        try:
+            _os.remove("/tmp/py_sql" + ext)
+        except FileNotFoundError:
+            pass
+    with Engine() as e:
+        r = e.query("CREATE TABLE '/tmp/py_sql' (UINT32, STRING, DOUBLE, INT64)")
+        check_eq(r.columns, ["created"])
+        r = e.query("INSERT INTO '/tmp/py_sql' VALUES (1, 'a', 1.5, -5), (2, 'b', 2.25, 9000000000), (3, 'a', 0, 7)")
+        check_eq(r.rows, [(3,)])
+        r = e.query("SELECT c1, count(*), sum(c2), max(c3) FROM '/tmp/py_sql' GROUP BY c1 ORDER BY c1")
+        check_eq(r.columns, ["c1", "count(*)", "sum(c2)", "max(c3)"])
+        check_eq(r.rows, [("a", 2, 1.5, 7), ("b", 1, 2.25, 9000000000)])
+        check_eq(len(r), 2)
+        check_eq(e.query("UPDATE '/tmp/py_sql' SET c1 = 'z' WHERE c0 >= 2").rows, [(2,)])
+        check_eq([row[0] for row in e.query("SELECT c0 FROM '/tmp/py_sql' WHERE c1 = 'z' ORDER BY c0")], [2, 3])
+        try:
+            e.query("SELECT * FROM '/tmp/py_sql_missing'")
+            check(False, "missing table should raise")
+        except MdbError as ex:
+            check("does not exist" in str(ex))
+        try:
+            e.query("SELEKT 1")
+            check(False, "syntax error should raise")
+        except MdbError:
+            pass
+
+def test_sum64():
+    with Engine() as e:
+        e.create_table("/tmp/py_sum64", [UINT32])
+        for _ in range(3):
+            e.insert("/tmp/py_sum64", [4_000_000_000])
+        check_eq(e.sum("/tmp/py_sum64", 0), 12_000_000_000)
+
 if __name__ == "__main__":
     test_lifecycle()
     test_create_insert_fetch()
@@ -286,6 +322,8 @@ if __name__ == "__main__":
     test_error_handling()
     test_closed_engine_errors()
     test_schema_not_registered()
+    test_sql_query()
+    test_sum64()
 
     if _failed:
         print(f"\n{_failed} test(s) FAILED", file=sys.stderr)

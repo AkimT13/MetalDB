@@ -117,5 +117,5 @@ When uploading strings to GPU, pack them into two MTLBuffers:
   pairs with carry detection (see add64 in gpu_groupby.metal)
 - 0xFFFFFFFF is the group-by kernel's empty-slot sentinel; the host aggregates that key on the CPU
 - GPU kernels currently only support UINT32; other ColTypes fall back to CPU
-- STRING heap has no compaction; deleted bytes are orphaned
+- STRING heap bytes of deleted rows are orphaned until `mdb compact <table>` rebuilds the table
 - materializeColumnWithRowIDs is the current hot path bottleneck (~18ms/call)

@@ -196,7 +196,7 @@ clean: cpu-clean
 CPU_DIR      := build-cpu
 CPU_CXX      ?= c++
 CPU_CC       ?= cc
-CPU_CXXFLAGS := -std=c++17 -O1 -g -Wall -I. -MMD -MP
+CPU_CXXFLAGS := -std=c++17 -O1 -g -Wall -fPIC -I. -MMD -MP
 CPU_CORE     := MasterPage ColumnFile RowIndex Table Engine GroupBy Join MiniSQL SqlParser WhereEval Csv TableTools QuerySession \
                 Server PgWire Wal mdb_c gpu_cpu_stub
 CPU_OBJS     := $(addprefix $(CPU_DIR)/,$(addsuffix .o,$(CPU_CORE)))
@@ -204,7 +204,7 @@ CPU_TESTS    := test_scan_hybrid test_persist_pages test_where_range test_engine
                 test_join test_types test_string_gpu test_compound_where test_mini_sql \
                 test_server test_wal test_atomic test_sql_where test_sql_groupby test_copy test_tools test_server_concurrency test_pgwire test_gpu_groupby test_multipage test_persistence test_reuse test_scan_sum \
                 test_table test_table_persist test_c_api
-CPU_BINS     := $(addprefix $(CPU_DIR)/,$(CPU_TESTS)) $(CPU_DIR)/mdb
+CPU_BINS     := $(addprefix $(CPU_DIR)/,$(CPU_TESTS)) $(CPU_DIR)/mdb $(CPU_DIR)/libmdb.so
 
 $(CPU_DIR):
 	mkdir -p $(CPU_DIR)
@@ -214,6 +214,9 @@ $(CPU_DIR)/%.o: %.cpp | $(CPU_DIR)
 
 $(CPU_DIR)/mdb: $(CPU_OBJS) $(CPU_DIR)/mdb.o
 	$(CPU_CXX) $^ -o $@ -lpthread
+
+$(CPU_DIR)/libmdb.so: $(CPU_OBJS)
+	$(CPU_CXX) -shared $(CPU_OBJS) -o $@ -lpthread
 
 $(CPU_DIR)/test_c_api: $(CPU_OBJS) tests/test_c_api.c | $(CPU_DIR)
 	$(CPU_CC) -std=c11 -g -I. -c tests/test_c_api.c -o $(CPU_DIR)/test_c_api.o
@@ -229,7 +232,9 @@ cpu: $(CPU_BINS)
 cpu-run: cpu
 	@set -e; cd $(CPU_DIR); for t in $(CPU_TESTS); do \
 	    echo "== $$t"; ./$$t; \
-	done; echo "CPU suite: all $(words $(CPU_TESTS)) tests passed"
+	done; \
+	if command -v python3 >/dev/null; then echo "== python bindings"; python3 ../../python/test_mdb.py; fi; \
+	echo "CPU suite: all $(words $(CPU_TESTS)) tests passed"
 
 cpu-clean:
 	rm -rf $(CPU_DIR)
