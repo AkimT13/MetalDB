@@ -502,6 +502,23 @@ retry), deleted rows, whole-column 64-bit sum. Passes CPU-only here; **run
 
 ---
 
+### C / Python: SQL Queries + Exact Sums, Python on Linux (complete)
+
+- C API: `mdb_query()` runs any mini-SQL statement and returns an opaque
+  `MdbQueryResult` (column names, logical column types, text values;
+  `mdb_free_result`). `mdb_sum64()` returns the exact 64-bit sum.
+- Python: `Engine.query(sql)` → `QueryResult` (`.columns`, `.types`, `.rows` as tuples
+  of int / float / str, iterable); `Engine.sum()` now uses `mdb_sum64` (it silently
+  truncated to 32 bits before).
+- The portable build also produces `build-cpu/libmdb.so`, the Python loader finds it,
+  and `make cpu-run` now runs `python/test_mdb.py` — so the Python bindings are tested
+  in CI on Linux for the first time.
+
+Coverage: `test_sql_query` in `test_c_api.c`; `test_sql_query` and `test_sum64` in
+`python/test_mdb.py`.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Steps

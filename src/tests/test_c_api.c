@@ -487,6 +487,41 @@ static void test_persist_reopen(void) {
     printf("PASS test_persist_reopen\n");
 }
 
+static void test_sql_query(void) {
+    MdbEngine* e = mdb_open();
+    CHECK(e != NULL);
+    remove("/tmp/c_sql.mdb"); remove("/tmp/c_sql.mdb.idx"); remove("/tmp/c_sql.mdb.wal"); remove("/tmp/c_sql.mdb.1.str");
+
+    MdbQueryResult* r = mdb_query(e, "CREATE TABLE '/tmp/c_sql' (UINT32, STRING)");
+    CHECK(r != NULL);
+    mdb_free_result(r);
+    r = mdb_query(e, "INSERT INTO '/tmp/c_sql' VALUES (4000000000, 'x'), (4000000000, 'y')");
+    CHECK(r != NULL && mdb_result_row_count(r) == 1);
+    CHECK(strcmp(mdb_result_column_name(r, 0), "rows_affected") == 0);
+    CHECK(strcmp(mdb_result_value(r, 0, 0), "2") == 0);
+    mdb_free_result(r);
+
+    r = mdb_query(e, "SELECT c1, c0 FROM '/tmp/c_sql' ORDER BY c1 DESC");
+    CHECK(r != NULL);
+    CHECK(mdb_result_column_count(r) == 2 && mdb_result_row_count(r) == 2);
+    CHECK(mdb_result_column_type(r, 0) == MDB_STRING && mdb_result_column_type(r, 1) == MDB_UINT32);
+    CHECK(strcmp(mdb_result_value(r, 0, 0), "y") == 0);
+    CHECK(mdb_result_value(r, 5, 0) == NULL && mdb_result_column_name(r, 9) == NULL);
+    CHECK(mdb_result_column_type(r, 9) == -1);
+    mdb_free_result(r);
+
+    uint64_t total = 0;
+    CHECK(mdb_sum64(e, "/tmp/c_sql", 0, &total) == MDB_OK);
+    CHECK(total == 8000000000ULL);
+
+    CHECK(mdb_query(e, "SELECT * FROM '/tmp/c_sql_missing'") == NULL);
+    CHECK(mdb_last_error(e) != NULL && strstr(mdb_last_error(e), "does not exist") != NULL);
+    CHECK(mdb_query(e, NULL) == NULL);
+    mdb_free_result(NULL);
+    mdb_close(e);
+    printf("PASS test_sql_query\n");
+}
+
 /* ── main ─────────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -507,6 +542,7 @@ int main(void) {
     test_query_validation_and_missing_table();
     test_free_null();
     test_persist_reopen();
+    test_sql_query();
 
     if (g_failed) {
         fprintf(stderr, "\n%d test(s) FAILED\n", g_failed);

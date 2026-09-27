@@ -33,6 +33,12 @@ Python notes:
 - It expects `libmdb.dylib` either in `python/` or `src/`.
 - Reopened tables still require explicit schema registration via `Engine.open_table(name, col_types)`.
 - Wrapper-side validation raises `ValueError` for Python argument mistakes and `MdbError` for engine/C API failures.
+- SQL from C: `mdb_query(engine, sql)` → `MdbQueryResult*` (`mdb_result_column_count`,
+  `mdb_result_row_count`, `mdb_result_column_name`, `mdb_result_column_type`,
+  `mdb_result_value`, `mdb_free_result`); exact sums via `mdb_sum64`
+- SQL from Python: `Engine.query(sql)` returns a `QueryResult` with `.columns`,
+  `.types`, and `.rows` (tuples of int / float / str); `Engine.sum()` is exact 64-bit
+- On Linux the portable build produces `src/build-cpu/libmdb.so`, which `mdb.py` loads
 - Both C and Python now expose explicit table flush:
   - C: `mdb_flush`
   - Python: `Engine.flush(name)`
