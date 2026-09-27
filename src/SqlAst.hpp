@@ -112,6 +112,7 @@ struct ParsedStatement {
     };
 
     Kind kind = Kind::Select;
+    bool explain = false;                       // EXPLAIN <statement>
     ParsedQuery query;                          // Select; tableName/where also used by Delete/Update
     std::vector<ColType> columnTypes;           // CreateTable
     std::vector<std::vector<Token>> insertRows; // Insert: literal tokens, coerced at execution time

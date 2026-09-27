@@ -14,6 +14,7 @@
 #include <optional>
 #include <iostream>
 #include <cctype>
+#include <chrono>
 #include <unistd.h>
 
 static void usage(const char* argv0) {
@@ -66,10 +67,12 @@ static std::string trim(const std::string& input) {
 static void printReplHelp() {
     std::puts("Mini-SQL REPL");
     std::puts(".help           show this help");
+    std::puts(".timer on|off   print execution time after each statement");
     std::puts(".quit           exit the REPL");
     std::puts("Queries must end with ';' and use the same syntax as `mdb query`.");
     std::puts("Statements: SELECT ... [WHERE] [GROUP BY] [ORDER BY] [LIMIT], CREATE TABLE,");
-    std::puts("            INSERT INTO ... VALUES, DELETE FROM ... [WHERE], DESCRIBE");
+    std::puts("            INSERT INTO ... VALUES, UPDATE ... SET, DELETE FROM ... [WHERE],");
+    std::puts("            DESCRIBE, EXPLAIN <statement>");
 }
 
 static bool findStatementTerminator(const std::string& input, size_t& pos) {
@@ -89,6 +92,7 @@ static int runRepl() {
     Engine engine;
     std::string pending;
     std::string line;
+    bool timer = false;
     printReplHelp();
     while (true) {
         std::printf("%s", pending.empty() ? "mdb> " : "...> ");
@@ -108,6 +112,10 @@ static int runRepl() {
                 printReplHelp();
                 continue;
             }
+            if (stripped == ".timer on" || stripped == ".timer off") {
+                timer = stripped == ".timer on";
+                continue;
+            }
             std::fprintf(stderr, "repl error: unknown command: %s\n", stripped.c_str());
             continue;
         }
@@ -120,7 +128,14 @@ static int runRepl() {
             const std::string statement = trim(pending.substr(0, termPos));
             pending.erase(0, termPos + 1);
             pending = trim(pending);
-            if (!statement.empty()) (void)executeMiniSQLToStream(engine, statement, "repl");
+            if (statement.empty()) continue;
+            const auto start = std::chrono::steady_clock::now();
+            (void)executeMiniSQLToStream(engine, statement, "repl");
+            if (timer) {
+                const double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+                std::printf("Time: %.3f ms\n", ms);
+            }
         }
     }
 }

@@ -194,6 +194,7 @@ public:
 
     ParsedStatement parse() {
         ParsedStatement stmt;
+        stmt.explain = matchKeyword("EXPLAIN");
         if (matchKeyword("CREATE")) {
             stmt.kind = ParsedStatement::Kind::CreateTable;
             parseCreateTable(stmt);
