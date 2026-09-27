@@ -339,6 +339,27 @@ no-match UPDATE, type / range / duplicate-column errors, reopen consistency).
 
 ---
 
+### GROUP BY v2 + DISTINCT + Exact Aggregates (complete)
+
+- `GROUP BY` accepts multiple key columns of any type (STRING included), any number of
+  aggregates, and combines with `WHERE`. Grouped columns may appear anywhere in the
+  select list; ungrouped plain columns are rejected with a clear error.
+- Execution: GPU-capable fast path (single UINT32 key, COUNT/SUM/AVG over UINT32, no
+  WHERE → `GroupBy::countByKey` / `sumByKey`); otherwise hash aggregation keyed by a
+  self-delimiting encoding of the key tuple, output sorted by typed key comparison.
+- `SELECT DISTINCT` (rewritten to GROUP BY over the selected columns).
+- Aggregates are exact: integer SUM uses a 128-bit accumulator (previously summed in
+  `long double` and printed with 6 significant digits, e.g. `1.23457e+07`); DOUBLE
+  output uses 15 significant digits.
+- `MiniSQLResult::types` reports each output column's logical type (used by ORDER BY,
+  and by the upcoming Postgres wire protocol for column type OIDs).
+
+Coverage: `test_sql_groupby` (20k rows; fast path, string keys + WHERE, INT64 sums
+beyond 2^53, multi-key, DISTINCT, empty input) in CPU and GPU dispatch modes; new
+GROUP BY cases in `test_mini_sql`.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility

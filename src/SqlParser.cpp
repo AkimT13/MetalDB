@@ -223,6 +223,7 @@ private:
     ParsedQuery parseSelect() {
         ParsedQuery query;
         expectKeyword("SELECT");
+        query.distinct = matchKeyword("DISTINCT");
         query.selectItems = parseSelectList();
         expectKeyword("FROM");
         query.tableName = expectTablePath();
@@ -231,8 +232,9 @@ private:
 
         if (matchKeyword("GROUP")) {
             expectKeyword("BY");
-            query.hasGroupBy = true;
-            query.groupBy = parseColumnRef(expect(TokenKind::Identifier, "group-by column"));
+            do {
+                query.groupBy.push_back(parseColumnRef(expect(TokenKind::Identifier, "group-by column")));
+            } while (match(TokenKind::Comma));
         }
 
         if (matchKeyword("ORDER")) {

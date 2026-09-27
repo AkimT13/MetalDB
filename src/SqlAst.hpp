@@ -87,9 +87,9 @@ struct OrderKey {
 struct ParsedQuery {
     std::string tableName;
     std::vector<SelectItem> selectItems;
+    bool distinct = false;             // SELECT DISTINCT
     std::shared_ptr<WhereExpr> where;  // null when there is no WHERE clause
-    bool hasGroupBy = false;
-    ColumnRef groupBy;
+    std::vector<ColumnRef> groupBy;    // empty when there is no GROUP BY
     std::vector<OrderKey> orderBy;
     bool hasLimit = false;
     uint64_t limit = 0;

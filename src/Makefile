@@ -30,7 +30,8 @@ DEPS := $(OBJS:.o=.d)
 # Tests
 TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
          test_engine test_groupby test_join test_types test_string_gpu test_compound_where \
-         test_c_api test_mini_sql test_server test_wal test_atomic test_sql_where
+         test_c_api test_mini_sql test_server test_wal test_atomic test_sql_where \
+         test_sql_groupby
 
 all: $(METALLIB_SRCS) $(TESTS) libmdb.a
 
@@ -109,6 +110,9 @@ test_atomic: $(OBJS) tests/test_atomic.cpp
 test_sql_where: $(OBJS) tests/test_sql_where.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+test_sql_groupby: $(OBJS) tests/test_sql_groupby.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 # ---- C API library + C test ----
 libmdb.a: $(OBJS)
 	ar rcs $@ $^
@@ -145,6 +149,7 @@ run: all
 	./test_wal
 	./test_atomic
 	./test_sql_where
+	./test_sql_groupby
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)
@@ -176,7 +181,7 @@ CPU_CORE     := MasterPage ColumnFile RowIndex Table Engine GroupBy Join MiniSQL
 CPU_OBJS     := $(addprefix $(CPU_DIR)/,$(addsuffix .o,$(CPU_CORE)))
 CPU_TESTS    := test_scan_hybrid test_persist_pages test_where_range test_engine test_groupby \
                 test_join test_types test_string_gpu test_compound_where test_mini_sql \
-                test_server test_wal test_atomic test_sql_where test_multipage test_persistence test_reuse test_scan_sum \
+                test_server test_wal test_atomic test_sql_where test_sql_groupby test_multipage test_persistence test_reuse test_scan_sum \
                 test_table test_table_persist test_c_api
 CPU_BINS     := $(addprefix $(CPU_DIR)/,$(CPU_TESTS)) $(CPU_DIR)/mdb
 
