@@ -373,6 +373,22 @@ concurrent sessions never mix plans. REPL gains `.timer on|off`.
 
 ---
 
+### CSV Import / Export via COPY (complete)
+
+- `COPY '<table>' FROM '<file>' [WITH HEADER]`: RFC 4180 reader (`Csv.cpp`: quoted
+  fields, `""`, embedded CR/LF, CRLF records). Parse + type-coerce everything first,
+  insert as one WAL transaction, then `flushDurable()` so large imports do not leave a
+  large WAL. Errors name the CSV record number; the table is left unchanged.
+- `COPY '<table>' TO '<file>'` and `COPY (SELECT ...) TO '<file>' [WITH HEADER]`:
+  writes `<file>.tmp` and renames into place (no half-written exports). DOUBLE / FLOAT
+  are written with round-trip precision (%.17g / %.9g) so export → import is bit-exact.
+
+Coverage: `test_copy` — all column types, strings with commas / quotes / newlines /
+padding / empty, bit-exact float round trip, CRLF + blank lines, five kinds of bad
+files rejected atomically, COPY (SELECT ...), durability across reopen.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility
