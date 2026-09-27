@@ -244,6 +244,18 @@ uint64_t Wal::appendDelete(uint32_t rowID) {
     return opID;
 }
 
+uint64_t Wal::beginTxn() {
+    return nextOpID_++;
+}
+
+void Wal::appendInsert(uint64_t txnID, uint32_t rowID, const std::vector<ColValue>& values) {
+    appendRecord(static_cast<uint8_t>(RecordType::Insert), txnID, encodeInsertPayload(rowID, values));
+}
+
+void Wal::appendDelete(uint64_t txnID, uint32_t rowID) {
+    appendRecord(static_cast<uint8_t>(RecordType::Delete), txnID, encodeDeletePayload(rowID));
+}
+
 void Wal::appendCommit(uint64_t opID) {
     appendRecord(static_cast<uint8_t>(RecordType::Commit), opID, {});
 }
@@ -252,7 +264,9 @@ std::vector<Wal::Operation> Wal::committedOperations() const {
     std::vector<Operation> committed;
     if (fd_ < 0) return committed;
 
-    std::unordered_map<uint64_t, Operation> pending;
+    // Records sharing an ID form one transaction (single-op records are the
+    // degenerate case); a commit releases the whole group in append order.
+    std::unordered_map<uint64_t, std::vector<Operation>> pending;
     off_t pos = sizeof(WalHeader);
     const off_t end = ::lseek(fd_, 0, SEEK_END);
     while (pos + off_t(sizeof(RecordHeader)) <= end) {
@@ -281,15 +295,15 @@ std::vector<Wal::Operation> Wal::committedOperations() const {
         try {
             switch (static_cast<RecordType>(header.type)) {
                 case RecordType::Insert:
-                    pending[header.opID] = decodeInsert(header.opID, payload);
+                    pending[header.opID].push_back(decodeInsert(header.opID, payload));
                     break;
                 case RecordType::Delete:
-                    pending[header.opID] = decodeDelete(header.opID, payload);
+                    pending[header.opID].push_back(decodeDelete(header.opID, payload));
                     break;
                 case RecordType::Commit: {
                     auto it = pending.find(header.opID);
                     if (it != pending.end()) {
-                        committed.push_back(it->second);
+                        for (auto& op : it->second) committed.push_back(std::move(op));
                         pending.erase(it);
                     }
                     break;

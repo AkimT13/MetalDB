@@ -24,8 +24,18 @@ public:
     ~Wal();
 
     void openOrCreate(bool create);
+
+    // Single-operation records: each gets a fresh ID, committed individually.
     uint64_t appendInsert(uint32_t rowID, const std::vector<ColValue>& values);
     uint64_t appendDelete(uint32_t rowID);
+
+    // Multi-operation transactions: every record appended with the same txnID is
+    // replayed only if a commit record for that txnID follows, in append order.
+    // A crash before appendCommit(txnID) discards the whole group on recovery.
+    uint64_t beginTxn();
+    void appendInsert(uint64_t txnID, uint32_t rowID, const std::vector<ColValue>& values);
+    void appendDelete(uint64_t txnID, uint32_t rowID);
+
     void appendCommit(uint64_t opID);
 
     std::vector<Operation> committedOperations() const;

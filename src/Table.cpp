@@ -275,12 +275,56 @@ uint32_t Table::insertRow(const std::vector<ValueType>& values) {
     return insertTypedRow(typed);
 }
 
+void Table::validateRow(const std::vector<ColValue>& values) const {
+    if (values.size() != cols_.size())
+        throw std::invalid_argument("row has " + std::to_string(values.size()) +
+                                    " values, table has " + std::to_string(cols_.size()) + " columns");
+    for (size_t c = 0; c < values.size(); ++c) {
+        if (values[c].type != cols_[c].colType())
+            throw std::invalid_argument("value type does not match column c" + std::to_string(c));
+    }
+}
+
 uint32_t Table::insertTypedRow(const std::vector<ColValue>& values) {
-    assert(values.size() == cols_.size());
+    validateRow(values);
     const uint32_t rowID = rowIndex_.rowsRecorded();
     const uint64_t opID = wal_.appendInsert(rowID, values);
     wal_.appendCommit(opID);
+    if (syncCommit_) wal_.sync();
     return insertTypedRowInternal(values, rowID);
+}
+
+std::vector<uint32_t> Table::applyAtomic(const std::vector<uint32_t>& deleteRowIDs,
+                                         const std::vector<std::vector<ColValue>>& inserts) {
+    for (const auto& row : inserts) validateRow(row);
+
+    std::vector<uint32_t> deletes;
+    deletes.reserve(deleteRowIDs.size());
+    for (uint32_t rowID : deleteRowIDs)
+        if (rowIndex_.isLive(rowID)) deletes.push_back(rowID);
+    std::sort(deletes.begin(), deletes.end());
+    deletes.erase(std::unique(deletes.begin(), deletes.end()), deletes.end());
+
+    std::vector<uint32_t> newRowIDs;
+    newRowIDs.reserve(inserts.size());
+    if (deletes.empty() && inserts.empty()) return newRowIDs;
+
+    // Log the whole group, commit, then apply (redo-only WAL: base files are
+    // never touched before the commit record exists).
+    const uint64_t txnID = wal_.beginTxn();
+    for (uint32_t rowID : deletes) wal_.appendDelete(txnID, rowID);
+    uint32_t nextRowID = rowIndex_.rowsRecorded();
+    for (const auto& row : inserts) {
+        wal_.appendInsert(txnID, nextRowID, row);
+        newRowIDs.push_back(nextRowID++);
+    }
+    wal_.appendCommit(txnID);
+    if (syncCommit_) wal_.sync();
+
+    for (uint32_t rowID : deletes) deleteRowInternal(rowID);
+    for (size_t i = 0; i < inserts.size(); ++i)
+        insertTypedRowInternal(inserts[i], newRowIDs[i]);
+    return newRowIDs;
 }
 
 std::vector<std::optional<ValueType>> Table::fetchRow(uint32_t rowID) {
@@ -308,6 +352,7 @@ void Table::deleteRow(uint32_t rowID) {
     if (!slotsOpt) return;
     const uint64_t opID = wal_.appendDelete(rowID);
     wal_.appendCommit(opID);
+    if (syncCommit_) wal_.sync();
     deleteRowInternal(rowID);
 }
 

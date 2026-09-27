@@ -42,6 +42,24 @@ public:
     void deleteRow(uint32_t rowID);
     void flushDurable();
 
+    // Atomically deletes `deleteRowIDs` (non-live IDs are ignored) and inserts
+    // `inserts`, as one WAL transaction: after a crash either all of it or none
+    // of it is recovered. Rows are validated before anything is logged, so an
+    // invalid row throws std::invalid_argument and leaves the table untouched.
+    // Returns the row IDs assigned to the inserted rows, in order.
+    std::vector<uint32_t> applyAtomic(const std::vector<uint32_t>& deleteRowIDs,
+                                      const std::vector<std::vector<ColValue>>& inserts);
+
+    // Throws std::invalid_argument unless `values` matches the schema exactly.
+    void validateRow(const std::vector<ColValue>& values) const;
+
+    // When on, every commit fsyncs the WAL before returning (durable against OS
+    // crash / power loss, at the cost of one fsync per statement). Default off:
+    // commits survive process crashes; call flushDurable() for a checkpoint.
+    void setSyncCommit(bool on) { syncCommit_ = on; }
+    bool syncCommit() const { return syncCommit_; }
+    bool isLive(uint32_t rowID) const { return rowIndex_.isLive(rowID); }
+
     // Scans / Aggregates
     std::vector<ValueType> materializeColumn(uint16_t colIdx);
     Materialized materializeColumnWithRowIDs(uint16_t colIdx);
@@ -100,4 +118,5 @@ private:
     // GPU usage knobs (single definition!)
     bool useGPU_ = true;
     size_t gpuThreshold_ = 4096;
+    bool syncCommit_ = false;
 };

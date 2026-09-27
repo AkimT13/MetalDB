@@ -7,8 +7,14 @@ std::string Engine::tablePath(const std::string& name) const {
     return name + ".mdb"; 
 }
 
+void Engine::setSyncCommit(bool on) {
+    syncCommit_ = on;
+    for (auto& [name, table] : tables_) table->setSyncCommit(on);
+}
+
 Table& Engine::createTable(const std::string& name, uint16_t numCols, uint16_t pageSize) {
     auto p = std::make_shared<Table>(tablePath(name), pageSize, numCols);
+    p->setSyncCommit(syncCommit_);
     tables_[name] = p;
     return *p;
 }
@@ -17,6 +23,7 @@ Table& Engine::createTypedTable(const std::string& name,
                                 const std::vector<ColType>& colTypes,
                                 uint16_t pageSize) {
     auto p = std::make_shared<Table>(tablePath(name), pageSize, colTypes);
+    p->setSyncCommit(syncCommit_);
     tables_[name] = p;
     return *p;
 }
@@ -25,6 +32,7 @@ Table& Engine::openTable(const std::string& name) {
     auto it = tables_.find(name);
     if (it != tables_.end()) return *(it->second);
     auto p = std::make_shared<Table>(tablePath(name));
+    p->setSyncCommit(syncCommit_);
     tables_[name] = p;
     return *p;
 }

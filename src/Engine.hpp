@@ -17,6 +17,10 @@ public:
     Table& openTable(const std::string& name);
     void flush(const std::string& name);
 
+    // Applies to every table this engine opens or creates from now on (and to
+    // tables already open). See Table::setSyncCommit.
+    void setSyncCommit(bool on);
+
     uint32_t insert(const std::string& name, const std::vector<ValueType>& row);
     uint32_t insertTyped(const std::string& name, const std::vector<ColValue>& row);
     std::vector<uint32_t> whereEq(const std::string& name, uint16_t col, ValueType v);
@@ -42,5 +46,6 @@ public:
 
 private:
     std::unordered_map<std::string, std::shared_ptr<Table>> tables_;
+    bool syncCommit_ = false;
     std::string tablePath(const std::string& name) const;
 };

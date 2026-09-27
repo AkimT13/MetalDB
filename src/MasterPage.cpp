@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cerrno>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 // On-disk layout of page 0:
 //   uint32_t magic
@@ -13,7 +15,8 @@
 //   uint8_t  colTypes[numColumns]        (ColType enum, 1 byte each)
 
 static void writeAll(int fd, const void* buf, size_t n) {
-    if (write(fd, buf, n) != ssize_t(n)) std::perror("MasterPage write");
+    if (write(fd, buf, n) != ssize_t(n))
+        throw std::runtime_error(std::string("MasterPage write failed: ") + std::strerror(errno));
 }
 
 MasterPage MasterPage::initnew(int fd, uint16_t pageSize, int numColumns) {

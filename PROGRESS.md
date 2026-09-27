@@ -276,6 +276,28 @@ Verified (CPU path, Metal entry points stubbed): `test_mini_sql`, `test_engine`,
 
 ---
 
+### Atomic Statements + Storage I/O Hardening (complete)
+
+- WAL transactions: records appended with a shared transaction ID are replayed only
+  if that ID's commit record follows (`Wal::beginTxn` + txn-scoped `appendInsert` /
+  `appendDelete`). The on-disk format is unchanged — single-op records are the
+  one-element case, so existing WALs recover exactly as before.
+- `Table::applyAtomic(deletes, inserts)`: validate → log group → commit → apply. A
+  crash either recovers the whole statement or none of it. Multi-row mini-SQL
+  `INSERT` and `DELETE` now use it.
+- `Table::validateRow`: schema/type checks before anything is logged
+  (`insertTypedRow` previously accepted mismatched `ColValue` types and wrote garbage).
+- Synchronous commit: `Table::setSyncCommit` / `Engine::setSyncCommit` fsync the WAL on
+  every commit for power-loss durability (default off; `flush` remains the checkpoint).
+- Write/read failures in `ColumnFile`, the string heap, `RowIndex`, and `MasterPage` now
+  throw instead of printing `perror` and continuing (silent data loss). `RowIndex`
+  entries are written with one `pwrite` instead of three `write` calls.
+
+Coverage: `test_atomic` — batch validation, committed-but-unapplied transaction
+replay, uncommitted (torn) transaction discard, SQL statements + sync-commit mode.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility

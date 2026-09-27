@@ -1000,7 +1000,8 @@ MiniSQLResult executeInsert(Engine& engine, const ParsedStatement& stmt) {
         rows.push_back(std::move(row));
     }
 
-    for (const auto& row : rows) table.insertTypedRow(row);
+    // One WAL transaction: a crash mid-statement never leaves a partial INSERT.
+    table.applyAtomic({}, rows);
     return rowsAffected(rows.size());
 }
 
@@ -1008,7 +1009,7 @@ MiniSQLResult executeDelete(Engine& engine, const ParsedStatement& stmt) {
     Table& table = openExistingTable(engine, stmt.query.tableName);
     if (stmt.query.hasWhere) validateWhere(table, stmt.query.where);
     const auto rowIDs = executeWhere(table, stmt.query);
-    for (uint32_t rowID : rowIDs) table.deleteRow(rowID);
+    table.applyAtomic(rowIDs, {});
     return rowsAffected(rowIDs.size());
 }
 
