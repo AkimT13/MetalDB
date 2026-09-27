@@ -46,11 +46,15 @@ fast-forward; never force-push). Update `PROGRESS.md` in the same commit as the 
 ### Layer Overview
 
 ```
-Engine            (public SQL-like API, table registry)
-  └─ Table        (per-table operations: insert/fetch/delete/scan)
-       ├─ ColumnFile   (on-disk column storage, one file per table)
-       ├─ RowIndex     (row→slot mapping, sidecar .mdb.idx file)
-       └─ GPU kernels  (gpu_scan_equals, gpu_scan_range, gpu_sum)
+mdb CLI / REPL, mdb serve (line), mdb pgserve (PgWire), C API (mdb_c), Python (ctypes)
+  └─ Mini-SQL     (SqlParser → WhereEval → MiniSQL executor; Csv for COPY)
+       └─ Engine  (table registry, per-table mutexes, --data-dir sandbox)
+            └─ Table   (insert/fetch/delete, applyAtomic, hybrid GPU/CPU scans)
+                 ├─ ColumnFile   (typed pages in {name}.mdb, zone maps, free-page lists)
+                 ├─ RowIndex     (row→slot mapping, sidecar .mdb.idx file)
+                 ├─ Wal          (redo log {name}.mdb.wal; ops grouped by txn ID)
+                 └─ GPU kernels  (gpu_scan_equals, gpu_scan_range, gpu_sum, gpu_groupby, gpu_string_scan)
+TableTools: offline verify / stats / backup / restore / compact
 ```
 
 ### Storage Format
