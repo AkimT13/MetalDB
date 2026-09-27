@@ -95,6 +95,12 @@ private:
     std::string buf_;
 };
 
+std::string cstr(const std::string& s) { return s + std::string(1, '\0'); }
+
+std::string be16(int16_t v) {
+    return std::string{static_cast<char>((v >> 8) & 0xFF), static_cast<char>(v & 0xFF)};
+}
+
 std::string startupPacket(const std::string& user) {
     std::string body = PgClient::be32(196608);
     body += "user";
@@ -246,15 +252,90 @@ int main() {
         r = simpleQuery(c, "SET search_path TO public");
         assert(r[0].body == std::string("SET") + '\0');
 
-        // Extended protocol: one error, ignore until Sync, then usable again.
-        c.sendMsg('P', std::string("\0SELECT 1\0\0\0", 12));
-        c.sendMsg('B', std::string("\0\0\0\0\0\0\0\0", 8));
-        c.sendMsg('E', std::string("\0\0\0\0\0", 5));
+        // ── Extended query protocol ──────────────────────────────────────────
+        // Named statement with a declared int4 parameter, reused across Binds.
+        c.sendMsg('P', cstr("q1") + cstr("SELECT c0, c1 FROM '/tmp/pgwire_tbl' WHERE c0 >= $1 ORDER BY c0") +
+                           be16(1) + PgClient::be32(23));
+        c.sendMsg('D', std::string("S") + cstr("q1"));
         c.sendMsg('S', "");
         auto ext = c.untilReady();
-        assert(types(ext) == "EZ" && field(ext[0], 'C') == "0A000");
+        assert(types(ext) == "1tTZ");  // ParseComplete, ParameterDescription, RowDescription, Ready
+        assert(PgClient::i16(ext[1].body, 0) == 1 && PgClient::i32(ext[1].body, 2) == 23);
+        assert(parseRowDescription(ext[2]).size() == 2);
+
+        // Bind with a *binary* int4 parameter (1) and binary results for column 0;
+        // Execute with maxRows = 2 → PortalSuspended, then the rest.
+        c.sendMsg('B', cstr("") + cstr("q1") + be16(1) + be16(1) + be16(1) + PgClient::be32(4) + PgClient::be32(1) +
+                           be16(2) + be16(1) + be16(0));
+        c.sendMsg('E', cstr("") + PgClient::be32(2));
+        c.sendMsg('E', cstr("") + PgClient::be32(0));
+        c.sendMsg('S', "");
+        ext = c.untilReady();
+        assert(types(ext) == "2DDsDCZ");
+        {
+            const auto first = parseDataRow(ext[1]);
+            assert(first[0].size() == 8 && first[0][7] == 1);  // int8 1 in binary
+            assert(first[1] == "a");                           // text column
+        }
+        assert(ext[5].body == std::string("SELECT 3") + '\0');
+
+        // Text parameters: a numeric-looking value for a STRING column stays a string.
+        c.sendMsg('P', cstr("") + cstr("SELECT count(*) FROM '/tmp/pgwire_tbl' WHERE c1 = $1") + be16(0));
+        c.sendMsg('B', cstr("") + cstr("") + be16(0) + be16(1) + PgClient::be32(1) + "z" + be16(0));
+        c.sendMsg('D', std::string("P") + cstr(""));
+        c.sendMsg('E', cstr("") + PgClient::be32(0));
+        c.sendMsg('S', "");
+        ext = c.untilReady();
+        assert(types(ext) == "12TDCZ" && parseDataRow(ext[3])[0] == "1");
+
+        // Writes: NoData on Describe, INSERT tag on Execute.
+        c.sendMsg('P', cstr("ins") + cstr("INSERT INTO '/tmp/pgwire_tbl' VALUES ($1, $2, $3, $4, $5)") + be16(0));
+        for (int i = 10; i < 12; ++i) {
+            std::string b = cstr("") + cstr("ins") + be16(0) + be16(5);
+            for (const std::string v : {std::to_string(i), std::string("x"), std::string("1.5"), std::string("-1"),
+                                        std::string("2")})
+                b += PgClient::be32(static_cast<int32_t>(v.size())) + v;
+            c.sendMsg('B', b + be16(0));
+            c.sendMsg('D', std::string("P") + cstr(""));
+            c.sendMsg('E', cstr("") + PgClient::be32(0));
+        }
+        c.sendMsg('S', "");
+        ext = c.untilReady();
+        assert(types(ext) == "12nC2nCZ" && ext[3].body == std::string("INSERT 0 1") + '\0');
+
+        // An error inside a batch: skip everything until Sync, then recover.
+        c.sendMsg('P', cstr("") + cstr("SELECT * FROM '/tmp/pgwire_missing' WHERE c0 = $1") + be16(0));
+        c.sendMsg('B', cstr("") + cstr("") + be16(0) + be16(1) + PgClient::be32(1) + "1" + be16(0));
+        c.sendMsg('E', cstr("") + PgClient::be32(0));
+        c.sendMsg('S', "");
+        ext = c.untilReady();
+        assert(types(ext) == "12EZ" && field(ext[2], 'C') == "42P01");
+        // Parameter count mismatch and unknown statements are protocol errors.
+        c.sendMsg('B', cstr("") + cstr("ins") + be16(0) + be16(1) + PgClient::be32(1) + "1" + be16(0));
+        c.sendMsg('S', "");
+        ext = c.untilReady();
+        assert(types(ext) == "EZ" && field(ext[0], 'C') == "08P01");
+        c.sendMsg('D', std::string("S") + cstr("nope"));
+        c.sendMsg('S', "");
+        ext = c.untilReady();
+        assert(types(ext) == "EZ" && field(ext[0], 'C') == "26000");
+        // Close a statement; binding it afterwards fails.
+        c.sendMsg('C', std::string("S") + cstr("ins"));
+        c.sendMsg('B', cstr("") + cstr("ins") + be16(0) + be16(0) + be16(0));
+        c.sendMsg('S', "");
+        ext = c.untilReady();
+        assert(types(ext) == "3EZ");
+
+        // Server-side cursors.
+        r = simpleQuery(c, "DECLARE cur CURSOR FOR SELECT c0 FROM '/tmp/pgwire_tbl' ORDER BY c0; "
+                           "FETCH 2 FROM cur; FETCH ALL IN cur; CLOSE cur");
+        assert(types(r) == "CTDDCTDDDCCZ");
+        assert(r[4].body == std::string("FETCH 2") + '\0' && r[9].body == std::string("FETCH 3") + '\0');
+        r = simpleQuery(c, "FETCH 1 FROM cur");
+        assert(types(r) == "EZ" && field(r[0], 'C') == "34000");
+
         r = simpleQuery(c, "SELECT count(*) FROM '/tmp/pgwire_tbl'");
-        assert(parseDataRow(r[1])[0] == "3");
+        assert(parseDataRow(r[1])[0] == "5");
 
         c.sendMsg('X', "");
         assert(c.closedByPeer());
@@ -276,7 +357,7 @@ int main() {
             const auto r = connectAndStart(good, "s3cret");
             assert(r.back().type == 'Z');
             const auto q = simpleQuery(good, "SELECT count(*) FROM '/tmp/pgwire_tbl'");
-            assert(parseDataRow(q[1])[0] == "3");
+            assert(parseDataRow(q[1])[0] == "5");
         }
         assert(stopMdb(secured) == 0);
     }

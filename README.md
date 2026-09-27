@@ -19,8 +19,9 @@ $ psql -h 127.0.0.1 -p 5433 -c "SELECT c1, count(*), avg(c2) FROM 'orders' WHERE
   every column type, multi-key `GROUP BY`, `DISTINCT`, `ORDER BY`, `LIMIT`/`OFFSET`, plus
   `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `COPY` (CSV), `DESCRIBE`, and `EXPLAIN`
   with per-predicate access paths and timings.
-- **PostgreSQL wire protocol**: `psql`, psycopg2, and other simple-query clients connect
-  unchanged. Columns have typed OIDs and errors carry SQLSTATE codes.
+- **PostgreSQL wire protocol**: `psql`, psycopg 3, psycopg2 and other drivers connect
+  unchanged, including prepared statements with binary parameters and results, and
+  server-side cursors. Columns have typed OIDs and errors carry SQLSTATE codes.
 - **Durability**: a redo-only write-ahead log with checksummed records. Every statement is
   one WAL transaction, so a crash never leaves a half-applied `INSERT`, `UPDATE`, or
   `DELETE`. Synchronous commit is optional, and explicit checkpoints are available.
@@ -158,8 +159,7 @@ mdb compact /tmp/orders
   anything is written.
 - There are no multi-statement transactions and no NULLs. Joins are available through the
   C++ and C APIs but not in SQL.
-- The PostgreSQL server supports the simple-query protocol only (no prepared statements,
-  TLS, or `pg_catalog`).
+- The PostgreSQL server has no TLS, SCRAM auth, or `COPY ... STDIN`.
 - GPU kernels operate on `UINT32` (and string equality). Other types run on the CPU.
 
 ## Project status

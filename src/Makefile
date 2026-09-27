@@ -233,7 +233,8 @@ cpu-run: cpu
 	@set -e; cd $(CPU_DIR); for t in $(CPU_TESTS); do \
 	    echo "== $$t"; ./$$t; \
 	done; \
-	if command -v python3 >/dev/null; then echo "== python bindings"; python3 ../../python/test_mdb.py; fi; \
+	if command -v python3 >/dev/null; then echo "== python bindings"; python3 ../../python/test_mdb.py; \
+	    echo "== postgres clients"; python3 ../../python/test_pg_clients.py .; fi; \
 	echo "CPU suite: all $(words $(CPU_TESTS)) tests passed"
 
 cpu-clean:

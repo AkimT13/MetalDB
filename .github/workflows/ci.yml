@@ -21,6 +21,8 @@ jobs:
             cc: clang
     steps:
       - uses: actions/checkout@v4
+      - name: Install PostgreSQL drivers for protocol tests
+        run: python3 -m pip install --quiet "psycopg[binary]" psycopg2-binary || true
       - name: Build and run CPU test suite
         run: make -C src cpu-run CPU_CXX=${{ matrix.cxx }} CPU_CC=${{ matrix.cc }}
 
