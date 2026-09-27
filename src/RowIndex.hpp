@@ -32,6 +32,11 @@ public:
     void forEachLive(const std::function<void(uint32_t, const std::vector<uint32_t>&)>& fn) const;
     void forEachLiveID(const std::function<void(uint32_t)>& fn) const;
     bool isLive(uint32_t rowID) const;
+    // Non-copying lookup: pointer to the row's slot IDs, or nullptr if not live.
+    const std::vector<uint32_t>* slotsOf(uint32_t rowID) const {
+        if (rowID >= entries_.size() || entries_[rowID].status == 0) return nullptr;
+        return &entries_[rowID].slots;
+    }
     void sync() const;
 
     // Load all rows from disk (called by openOrCreate)

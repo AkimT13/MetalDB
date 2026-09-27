@@ -33,12 +33,17 @@ public:
     // Knobs
     void setUseGPU(bool on) { useGPU_ = on; }
     void setGPUThreshold(size_t n) { gpuThreshold_ = n; }
+    bool useGPU() const { return useGPU_; }
+    size_t gpuThreshold() const { return gpuThreshold_; }
 
     // Core ops (legacy ValueType / new typed)
     uint32_t insertRow(const std::vector<ValueType> &values);
     uint32_t insertTypedRow(const std::vector<ColValue> &values);
     std::vector<std::optional<ValueType>> fetchRow(uint32_t rowID);
     std::vector<std::optional<ColValue>>  fetchTypedRow(uint32_t rowID);
+    // Single cell; nullopt if the row is not live. Cheaper than fetchTypedRow
+    // when only a few columns of a wide row are needed.
+    std::optional<ColValue> fetchTypedValue(uint32_t rowID, uint16_t colIdx) const;
     void deleteRow(uint32_t rowID);
     void flushDurable();
 

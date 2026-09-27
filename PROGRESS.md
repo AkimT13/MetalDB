@@ -298,6 +298,36 @@ replay, uncommitted (torn) transaction discard, SQL statements + sync-commit mod
 
 ---
 
+### Mini-SQL v3: Boolean WHERE Expressions on All Types (complete)
+
+Mini-SQL is now split into modules:
+
+| File | Role |
+|------|------|
+| `SqlAst.hpp` | tokens + AST (`SelectItem`, `WhereExpr`, `ParsedStatement`) |
+| `SqlParser.cpp` | lexer + recursive-descent parser |
+| `WhereEval.cpp` | WHERE validation, literal coercion, evaluation |
+| `MiniSQL.cpp` | statement execution |
+
+WHERE is now a full boolean tree: `AND` / `OR` / `NOT`, parentheses, `!=` / `<>`,
+`[NOT] BETWEEN`, `[NOT] IN (...)`, on UINT32, INT64, FLOAT, DOUBLE, and STRING columns.
+Evaluation yields sorted row-ID sets: UINT32 `=` / range leaves still go through
+`Table::scanPredicate` (zone maps + GPU dispatch), string equality through the GPU
+string scan, everything else is a CPU scan, and connectives are intersect / union /
+complement. Comparisons are type-correct: INT64 compares exactly against integer
+literals (no 53-bit rounding), and fractional or out-of-range literals against UINT32
+columns become the right ranges (`c < 2.5` → `c <= 2`, `c = 1.5` → no rows).
+
+Also: several scalar aggregates per query, `COUNT(cN)`, `MIN` / `MAX` on strings,
+projections / aggregates fetch only referenced cells (`Table::fetchTypedValue`,
+`RowIndex::slotsOf`) instead of whole rows, `LIMIT` without `ORDER BY` stops
+materializing early, `-- comments`, and parse errors now name the offending token.
+
+Coverage: `test_sql_where` — 45 WHERE clauses checked against a brute-force reference
+over 5k rows of all column types with deletions, run CPU-only and GPU-eligible.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility

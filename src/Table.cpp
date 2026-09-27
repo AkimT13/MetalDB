@@ -275,6 +275,13 @@ uint32_t Table::insertRow(const std::vector<ValueType>& values) {
     return insertTypedRow(typed);
 }
 
+std::optional<ColValue> Table::fetchTypedValue(uint32_t rowID, uint16_t colIdx) const {
+    if (colIdx >= cols_.size()) return std::nullopt;
+    const auto* slots = rowIndex_.slotsOf(rowID);
+    if (!slots) return std::nullopt;
+    return cols_[colIdx].fetchTypedSlot((*slots)[colIdx]);
+}
+
 void Table::validateRow(const std::vector<ColValue>& values) const {
     if (values.size() != cols_.size())
         throw std::invalid_argument("row has " + std::to_string(values.size()) +

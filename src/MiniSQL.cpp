@@ -1,116 +1,26 @@
+// Mini-SQL executor. Parsing lives in SqlParser, WHERE evaluation in WhereEval;
+// this file validates statement shape against the table schema and executes.
 #include "MiniSQL.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
-#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <unistd.h>
 #include <utility>
 #include <vector>
 
 #include "Engine.hpp"
-#include "Predicate.hpp"
+#include "SqlParser.hpp"
 #include "Table.hpp"
 #include "ValueTypes.hpp"
+#include "WhereEval.hpp"
+
+using namespace sql;
 
 namespace {
-
-enum class TokenKind {
-    Identifier,
-    Number,
-    String,
-    Comma,
-    Star,
-    LParen,
-    RParen,
-    Eq,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    Semicolon,
-    End,
-};
-
-struct Token {
-    TokenKind kind = TokenKind::End;
-    std::string text;
-};
-
-struct ColumnRef {
-    uint16_t index = 0;
-    std::string text;
-};
-
-struct SelectItem {
-    enum class Kind {
-        Column,
-        Star,
-        CountStar,
-        Sum,
-        Min,
-        Max,
-        Avg,
-    };
-
-    Kind kind = Kind::Column;
-    ColumnRef column;
-};
-
-struct ParsedWhere {
-    enum class Connective {
-        And,
-        Or,
-    };
-
-    std::vector<Predicate> predicates;
-    Connective connective = Connective::And;
-    bool hasConnective = false;
-    // Range comparisons that can never match (e.g. `c0 < 0`) are dropped from
-    // `predicates`; their columns are kept here so they are still validated.
-    std::vector<uint16_t> emptyRangeCols;
-    bool alwaysFalse = false;
-};
-
-struct OrderKey {
-    std::string header;   // output column header to sort on (e.g. "c1", "count(*)")
-    size_t position = 0;  // 1-based output position when ordered by number; 0 otherwise
-    bool descending = false;
-};
-
-struct ParsedQuery {
-    std::string tableName;
-    std::vector<SelectItem> selectItems;
-    bool hasWhere = false;
-    ParsedWhere where;
-    bool hasGroupBy = false;
-    ColumnRef groupBy;
-    std::vector<OrderKey> orderBy;
-    bool hasLimit = false;
-    uint64_t limit = 0;
-    uint64_t offset = 0;
-};
-
-struct ParsedStatement {
-    enum class Kind {
-        Select,
-        CreateTable,
-        Insert,
-        Delete,
-        Describe,
-    };
-
-    Kind kind = Kind::Select;
-    ParsedQuery query;                          // Select; tableName/where also used by Delete
-    std::vector<ColType> columnTypes;           // CreateTable
-    std::vector<std::vector<Token>> insertRows; // Insert: literal tokens, coerced at execution time
-};
 
 struct AggregateState {
     uint64_t count = 0;
@@ -118,505 +28,6 @@ struct AggregateState {
     ColValue min;
     ColValue max;
     bool hasValue = false;
-};
-
-class Tokenizer {
-public:
-    explicit Tokenizer(const std::string& input) : input_(input) {}
-
-    std::vector<Token> tokenize() {
-        std::vector<Token> tokens;
-        while (true) {
-            skipWhitespace();
-            if (pos_ >= input_.size()) {
-                tokens.push_back({TokenKind::End, ""});
-                return tokens;
-            }
-
-            const char ch = input_[pos_];
-            if (std::isalpha(static_cast<unsigned char>(ch)) || ch == '_') {
-                tokens.push_back(readIdentifier());
-                continue;
-            }
-            if (std::isdigit(static_cast<unsigned char>(ch)) ||
-                ((ch == '-' || ch == '.') && pos_ + 1 < input_.size() &&
-                 std::isdigit(static_cast<unsigned char>(input_[pos_ + 1])))) {
-                tokens.push_back(readNumber());
-                continue;
-            }
-            if (ch == '\'') {
-                tokens.push_back(readString());
-                continue;
-            }
-
-            switch (ch) {
-                case ',':
-                    ++pos_;
-                    tokens.push_back({TokenKind::Comma, ","});
-                    break;
-                case '*':
-                    ++pos_;
-                    tokens.push_back({TokenKind::Star, "*"});
-                    break;
-                case '(':
-                    ++pos_;
-                    tokens.push_back({TokenKind::LParen, "("});
-                    break;
-                case ')':
-                    ++pos_;
-                    tokens.push_back({TokenKind::RParen, ")"});
-                    break;
-                case '=':
-                    ++pos_;
-                    tokens.push_back({TokenKind::Eq, "="});
-                    break;
-                case '<':
-                    ++pos_;
-                    if (pos_ < input_.size() && input_[pos_] == '=') {
-                        ++pos_;
-                        tokens.push_back({TokenKind::Le, "<="});
-                    } else if (pos_ < input_.size() && input_[pos_] == '>') {
-                        throw std::invalid_argument("<> is not supported");
-                    } else {
-                        tokens.push_back({TokenKind::Lt, "<"});
-                    }
-                    break;
-                case '>':
-                    ++pos_;
-                    if (pos_ < input_.size() && input_[pos_] == '=') {
-                        ++pos_;
-                        tokens.push_back({TokenKind::Ge, ">="});
-                    } else {
-                        tokens.push_back({TokenKind::Gt, ">"});
-                    }
-                    break;
-                case ';':
-                    ++pos_;
-                    tokens.push_back({TokenKind::Semicolon, ";"});
-                    break;
-                default:
-                    throw std::invalid_argument(std::string("unexpected character: ") + ch);
-            }
-        }
-    }
-
-private:
-    Token readIdentifier() {
-        const size_t start = pos_;
-        while (pos_ < input_.size()) {
-            const char ch = input_[pos_];
-            if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_') break;
-            ++pos_;
-        }
-        return {TokenKind::Identifier, input_.substr(start, pos_ - start)};
-    }
-
-    // Accepts an optional leading '-', digits, an optional fraction and exponent.
-    // Callers decide which shapes are valid for the target column type.
-    Token readNumber() {
-        const size_t start = pos_;
-        if (input_[pos_] == '-') ++pos_;
-        auto digits = [&] {
-            while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) ++pos_;
-        };
-        digits();
-        if (pos_ < input_.size() && input_[pos_] == '.') {
-            ++pos_;
-            digits();
-        }
-        if (pos_ < input_.size() && (input_[pos_] == 'e' || input_[pos_] == 'E')) {
-            size_t p = pos_ + 1;
-            if (p < input_.size() && (input_[p] == '+' || input_[p] == '-')) ++p;
-            if (p < input_.size() && std::isdigit(static_cast<unsigned char>(input_[p]))) {
-                pos_ = p;
-                digits();
-            }
-        }
-        return {TokenKind::Number, input_.substr(start, pos_ - start)};
-    }
-
-    Token readString() {
-        ++pos_;
-        std::string value;
-        while (pos_ < input_.size()) {
-            const char ch = input_[pos_++];
-            if (ch == '\'') {
-                // '' inside a literal is an escaped single quote
-                if (pos_ < input_.size() && input_[pos_] == '\'') {
-                    value.push_back('\'');
-                    ++pos_;
-                    continue;
-                }
-                return {TokenKind::String, value};
-            }
-            value.push_back(ch);
-        }
-        throw std::invalid_argument("unterminated string literal");
-    }
-
-    void skipWhitespace() {
-        while (pos_ < input_.size() &&
-               std::isspace(static_cast<unsigned char>(input_[pos_]))) ++pos_;
-    }
-
-    const std::string& input_;
-    size_t pos_ = 0;
-};
-
-class Parser {
-public:
-    explicit Parser(const std::vector<Token>& tokens) : tokens_(tokens) {}
-
-    ParsedStatement parse() {
-        ParsedStatement stmt;
-        if (matchKeyword("CREATE")) {
-            stmt.kind = ParsedStatement::Kind::CreateTable;
-            parseCreateTable(stmt);
-        } else if (matchKeyword("INSERT")) {
-            stmt.kind = ParsedStatement::Kind::Insert;
-            parseInsert(stmt);
-        } else if (matchKeyword("DELETE")) {
-            stmt.kind = ParsedStatement::Kind::Delete;
-            parseDelete(stmt);
-        } else if (matchKeyword("DESCRIBE")) {
-            stmt.kind = ParsedStatement::Kind::Describe;
-            stmt.query.tableName = expectTablePath();
-        } else {
-            stmt.kind = ParsedStatement::Kind::Select;
-            stmt.query = parseSelect();
-        }
-
-        if (peek().kind == TokenKind::Semicolon) ++pos_;
-        expect(TokenKind::End, "end of query");
-        return stmt;
-    }
-
-private:
-    ParsedQuery parseSelect() {
-        ParsedQuery query;
-        expectKeyword("SELECT");
-        query.selectItems = parseSelectList();
-        expectKeyword("FROM");
-        query.tableName = expectTablePath();
-
-        if (matchKeyword("WHERE")) {
-            query.hasWhere = true;
-            query.where = parseWhereClause();
-        }
-
-        if (matchKeyword("GROUP")) {
-            expectKeyword("BY");
-            query.hasGroupBy = true;
-            query.groupBy = parseColumnRef(expect(TokenKind::Identifier, "group-by column"));
-        }
-
-        if (matchKeyword("ORDER")) {
-            expectKeyword("BY");
-            do {
-                query.orderBy.push_back(parseOrderKey());
-            } while (match(TokenKind::Comma));
-        }
-
-        if (matchKeyword("LIMIT")) {
-            query.hasLimit = true;
-            query.limit = parseCount(expect(TokenKind::Number, "LIMIT count"));
-            if (matchKeyword("OFFSET"))
-                query.offset = parseCount(expect(TokenKind::Number, "OFFSET count"));
-        }
-        return query;
-    }
-
-    // CREATE TABLE '<path>' (UINT32, STRING, ...)   or   (c0 UINT32, c1 STRING, ...)
-    void parseCreateTable(ParsedStatement& stmt) {
-        expectKeyword("TABLE");
-        stmt.query.tableName = expectTablePath();
-        expect(TokenKind::LParen, "(");
-        do {
-            Token token = expect(TokenKind::Identifier, "column type");
-            if (peek().kind == TokenKind::Identifier) {
-                const ColumnRef ref = parseColumnRef(token);
-                if (ref.index != stmt.columnTypes.size())
-                    throw std::invalid_argument("CREATE TABLE columns must be named c0, c1, ... in order");
-                token = expect(TokenKind::Identifier, "column type");
-            }
-            stmt.columnTypes.push_back(parseColType(token));
-        } while (match(TokenKind::Comma));
-        expect(TokenKind::RParen, ")");
-        if (stmt.columnTypes.size() > 0xFFFFu)
-            throw std::invalid_argument("too many columns");
-    }
-
-    // INSERT INTO '<path>' VALUES (v0, v1, ...) [, (...)]*
-    void parseInsert(ParsedStatement& stmt) {
-        expectKeyword("INTO");
-        stmt.query.tableName = expectTablePath();
-        expectKeyword("VALUES");
-        do {
-            expect(TokenKind::LParen, "(");
-            std::vector<Token> row;
-            do {
-                if (peek().kind != TokenKind::Number && peek().kind != TokenKind::String)
-                    throw std::invalid_argument("expected numeric or string literal in VALUES");
-                row.push_back(tokens_[pos_++]);
-            } while (match(TokenKind::Comma));
-            expect(TokenKind::RParen, ")");
-            stmt.insertRows.push_back(std::move(row));
-        } while (match(TokenKind::Comma));
-    }
-
-    // DELETE FROM '<path>' [WHERE ...]
-    void parseDelete(ParsedStatement& stmt) {
-        expectKeyword("FROM");
-        stmt.query.tableName = expectTablePath();
-        if (matchKeyword("WHERE")) {
-            stmt.query.hasWhere = true;
-            stmt.query.where = parseWhereClause();
-        }
-    }
-
-    std::string expectTablePath() {
-        const std::string path = expect(TokenKind::String, "table path string literal").text;
-        if (path.empty()) throw std::invalid_argument("table path must not be empty");
-        return path;
-    }
-
-    ColType parseColType(const Token& token) {
-        if (equalsIgnoreCase(token.text, "UINT32")) return ColType::UINT32;
-        if (equalsIgnoreCase(token.text, "INT64")) return ColType::INT64;
-        if (equalsIgnoreCase(token.text, "FLOAT")) return ColType::FLOAT;
-        if (equalsIgnoreCase(token.text, "DOUBLE")) return ColType::DOUBLE;
-        if (equalsIgnoreCase(token.text, "STRING")) return ColType::STRING;
-        throw std::invalid_argument("unknown column type: " + token.text);
-    }
-
-    OrderKey parseOrderKey() {
-        OrderKey key;
-        if (peek().kind == TokenKind::Number) {
-            key.position = parseCount(tokens_[pos_++]);
-            if (key.position == 0) throw std::invalid_argument("ORDER BY position must be >= 1");
-        } else {
-            const SelectItem item = parseSelectItem();
-            switch (item.kind) {
-                case SelectItem::Kind::Column: key.header = item.column.text; break;
-                case SelectItem::Kind::CountStar: key.header = "count(*)"; break;
-                case SelectItem::Kind::Sum: key.header = "sum(" + item.column.text + ")"; break;
-                case SelectItem::Kind::Min: key.header = "min(" + item.column.text + ")"; break;
-                case SelectItem::Kind::Max: key.header = "max(" + item.column.text + ")"; break;
-                case SelectItem::Kind::Avg: key.header = "avg(" + item.column.text + ")"; break;
-                case SelectItem::Kind::Star: throw std::invalid_argument("ORDER BY * is not supported");
-            }
-        }
-        if (matchKeyword("DESC")) key.descending = true;
-        else (void)matchKeyword("ASC");
-        return key;
-    }
-
-    uint64_t parseCount(const Token& token) {
-        if (token.text.empty() ||
-            !std::all_of(token.text.begin(), token.text.end(), [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)); }))
-            throw std::invalid_argument("expected non-negative integer, got " + token.text);
-        try {
-            return std::stoull(token.text);
-        } catch (const std::out_of_range&) {
-            throw std::invalid_argument("integer out of range: " + token.text);
-        }
-    }
-
-    std::vector<SelectItem> parseSelectList() {
-        std::vector<SelectItem> items;
-        do {
-            items.push_back(parseSelectItem());
-        } while (match(TokenKind::Comma));
-        return items;
-    }
-
-    SelectItem parseSelectItem() {
-        if (match(TokenKind::Star)) {
-            SelectItem item;
-            item.kind = SelectItem::Kind::Star;
-            return item;
-        }
-
-        const Token token = expect(TokenKind::Identifier, "select item");
-        if (equalsIgnoreCase(token.text, "COUNT")) return parseAggregate(SelectItem::Kind::CountStar, true);
-        if (equalsIgnoreCase(token.text, "SUM")) return parseAggregate(SelectItem::Kind::Sum, false);
-        if (equalsIgnoreCase(token.text, "MIN")) return parseAggregate(SelectItem::Kind::Min, false);
-        if (equalsIgnoreCase(token.text, "MAX")) return parseAggregate(SelectItem::Kind::Max, false);
-        if (equalsIgnoreCase(token.text, "AVG")) return parseAggregate(SelectItem::Kind::Avg, false);
-
-        SelectItem item;
-        item.kind = SelectItem::Kind::Column;
-        item.column = parseColumnRef(token);
-        return item;
-    }
-
-    SelectItem parseAggregate(SelectItem::Kind kind, bool allowStar) {
-        expect(TokenKind::LParen, "(");
-        SelectItem item;
-        item.kind = kind;
-        if (allowStar && match(TokenKind::Star)) {
-            expect(TokenKind::RParen, ")");
-            return item;
-        }
-        item.column = parseColumnRef(expect(TokenKind::Identifier, "aggregate column"));
-        expect(TokenKind::RParen, ")");
-        return item;
-    }
-
-    ParsedWhere parseWhereClause() {
-        ParsedWhere where;
-        size_t emptyTerms = 0;
-        auto addTerm = [&] {
-            bool empty = false;
-            Predicate predicate = parsePredicate(empty);
-            if (empty) {
-                where.emptyRangeCols.push_back(predicate.colIdx);
-                ++emptyTerms;
-            } else {
-                where.predicates.push_back(std::move(predicate));
-            }
-        };
-
-        addTerm();
-        while (true) {
-            if (matchKeyword("AND")) {
-                if (where.hasConnective && where.connective != ParsedWhere::Connective::And)
-                    throw std::invalid_argument("mixed AND/OR WHERE clauses are not supported");
-                where.hasConnective = true;
-                where.connective = ParsedWhere::Connective::And;
-                addTerm();
-                continue;
-            }
-            if (matchKeyword("OR")) {
-                if (where.hasConnective && where.connective != ParsedWhere::Connective::Or)
-                    throw std::invalid_argument("mixed AND/OR WHERE clauses are not supported");
-                where.hasConnective = true;
-                where.connective = ParsedWhere::Connective::Or;
-                addTerm();
-                continue;
-            }
-            // An AND with an unsatisfiable term, or an OR of only unsatisfiable terms, matches nothing.
-            where.alwaysFalse = where.predicates.empty() ||
-                                (where.connective == ParsedWhere::Connective::And && emptyTerms > 0);
-            return where;
-        }
-    }
-
-    // Parses one WHERE term. `<`, `<=`, `>`, `>=` are lowered onto BETWEEN over the
-    // UINT32 domain; `empty` is set when the range can never match (e.g. `c0 < 0`).
-    Predicate parsePredicate(bool& empty) {
-        Predicate predicate;
-        empty = false;
-        predicate.colIdx = parseColumnRef(expect(TokenKind::Identifier, "predicate column")).index;
-
-        const TokenKind op = peek().kind;
-        if (op == TokenKind::Lt || op == TokenKind::Le || op == TokenKind::Gt || op == TokenKind::Ge) {
-            ++pos_;
-            const ValueType v = parseNumber(expect(TokenKind::Number, "numeric literal"));
-            constexpr ValueType kMax = std::numeric_limits<ValueType>::max();
-            predicate.kind = Predicate::Kind::BETWEEN;
-            switch (op) {
-                case TokenKind::Lt:
-                    empty = (v == 0);
-                    predicate.lo = 0;
-                    predicate.hi = empty ? 0 : v - 1;
-                    break;
-                case TokenKind::Le:
-                    predicate.lo = 0;
-                    predicate.hi = v;
-                    break;
-                case TokenKind::Gt:
-                    empty = (v == kMax);
-                    predicate.lo = empty ? kMax : v + 1;
-                    predicate.hi = kMax;
-                    break;
-                default:
-                    predicate.lo = v;
-                    predicate.hi = kMax;
-                    break;
-            }
-            return predicate;
-        }
-
-        if (match(TokenKind::Eq)) {
-            if (peek().kind == TokenKind::String) {
-                predicate.kind = Predicate::Kind::EQ_STRING;
-                predicate.needle = expect(TokenKind::String, "string literal").text;
-                return predicate;
-            }
-            predicate.kind = Predicate::Kind::EQ;
-            predicate.lo = parseNumber(expect(TokenKind::Number, "numeric literal"));
-            predicate.hi = predicate.lo;
-            return predicate;
-        }
-        expectKeyword("BETWEEN");
-        predicate.kind = Predicate::Kind::BETWEEN;
-        predicate.lo = parseNumber(expect(TokenKind::Number, "numeric lower bound"));
-        expectKeyword("AND");
-        predicate.hi = parseNumber(expect(TokenKind::Number, "numeric upper bound"));
-        return predicate;
-    }
-
-    ColumnRef parseColumnRef(const Token& token) {
-        if (token.kind != TokenKind::Identifier || token.text.size() < 2 ||
-            (token.text[0] != 'c' && token.text[0] != 'C')) {
-            throw std::invalid_argument("expected column reference like c0");
-        }
-        const std::string digits = token.text.substr(1);
-        if (digits.empty() ||
-            !std::all_of(digits.begin(), digits.end(), [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)); })) {
-            throw std::invalid_argument("expected column reference like c0");
-        }
-        const unsigned long index = std::stoul(digits);
-        if (index > 0xFFFFul) throw std::invalid_argument("column index out of range");
-        return {static_cast<uint16_t>(index), "c" + digits};
-    }
-
-    ValueType parseNumber(const Token& token) {
-        const uint64_t value = parseCount(token);
-        if (value > 0xFFFFFFFFull) throw std::invalid_argument("numeric literal out of UINT32 range");
-        return static_cast<ValueType>(value);
-    }
-
-    bool match(TokenKind kind) {
-        if (peek().kind != kind) return false;
-        ++pos_;
-        return true;
-    }
-
-    bool matchKeyword(const char* keyword) {
-        if (peek().kind != TokenKind::Identifier) return false;
-        if (!equalsIgnoreCase(peek().text, keyword)) return false;
-        ++pos_;
-        return true;
-    }
-
-    Token expect(TokenKind kind, const char* what) {
-        if (peek().kind != kind)
-            throw std::invalid_argument(std::string("expected ") + what);
-        return tokens_[pos_++];
-    }
-
-    void expectKeyword(const char* keyword) {
-        if (!matchKeyword(keyword))
-            throw std::invalid_argument(std::string("expected keyword ") + keyword);
-    }
-
-    const Token& peek() const { return tokens_[pos_]; }
-
-    static bool equalsIgnoreCase(const std::string& lhs, const char* rhs) {
-        size_t i = 0;
-        for (; i < lhs.size() && rhs[i]; ++i) {
-            if (std::toupper(static_cast<unsigned char>(lhs[i])) !=
-                std::toupper(static_cast<unsigned char>(rhs[i]))) {
-                return false;
-            }
-        }
-        return i == lhs.size() && rhs[i] == '\0';
-    }
-
-    const std::vector<Token>& tokens_;
-    size_t pos_ = 0;
 };
 
 std::string formatColValue(const ColValue& value) {
@@ -641,16 +52,6 @@ void validateColumnRef(const Table& table, uint16_t colIdx) {
         throw std::invalid_argument("column index out of bounds");
 }
 
-void validateWhere(const Table& table, const ParsedWhere& where) {
-    for (const auto& predicate : where.predicates)
-        validateColumnRef(table, predicate.colIdx);
-    for (uint16_t colIdx : where.emptyRangeCols) {
-        validateColumnRef(table, colIdx);
-        if (table.columnFile(colIdx).colType() != ColType::UINT32)
-            throw std::invalid_argument("numeric predicates require UINT32 columns");
-    }
-}
-
 void validateQueryShape(const Table& table, const ParsedQuery& query) {
     bool hasStar = false;
     bool hasColumn = false;
@@ -668,12 +69,18 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
             case SelectItem::Kind::CountStar:
                 ++aggregateCount;
                 break;
-            case SelectItem::Kind::Sum:
+            case SelectItem::Kind::Count:
             case SelectItem::Kind::Min:
             case SelectItem::Kind::Max:
+                ++aggregateCount;
+                validateColumnRef(table, item.column.index);
+                break;
+            case SelectItem::Kind::Sum:
             case SelectItem::Kind::Avg:
                 ++aggregateCount;
                 validateColumnRef(table, item.column.index);
+                if (table.columnFile(item.column.index).colType() == ColType::STRING)
+                    throw std::invalid_argument(item.header() + " requires a numeric column");
                 break;
         }
     }
@@ -683,11 +90,11 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
     if (hasStar && query.hasGroupBy)
         throw std::invalid_argument("SELECT * with GROUP BY is not supported");
 
-    if (query.hasWhere) validateWhere(table, query.where);
+    if (query.where) validateWhere(table, *query.where);
 
     if (query.hasGroupBy) {
         validateColumnRef(table, query.groupBy.index);
-        if (query.hasWhere)
+        if (query.where)
             throw std::invalid_argument("GROUP BY with WHERE is not supported in mini-SQL v1");
         if (aggregateCount != 1)
             throw std::invalid_argument("GROUP BY queries require exactly one aggregate expression");
@@ -697,7 +104,7 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
             throw std::invalid_argument("GROUP BY queries must select the group key first");
         }
         const auto& agg = query.selectItems[1];
-        if (agg.kind != SelectItem::Kind::CountStar) {
+        if (agg.kind != SelectItem::Kind::CountStar && agg.kind != SelectItem::Kind::Count) {
             if (table.columnFile(query.groupBy.index).colType() != ColType::UINT32 ||
                 table.columnFile(agg.column.index).colType() != ColType::UINT32) {
                 throw std::invalid_argument("GROUP BY v1 supports UINT32 key/value columns only");
@@ -711,26 +118,12 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
     if (aggregateCount > 0) {
         if (hasColumn || hasStar)
             throw std::invalid_argument("aggregate queries cannot mix aggregates with plain columns");
-        if (aggregateCount != 1)
-            throw std::invalid_argument("non-grouped aggregate queries support exactly one aggregate");
     }
 }
 
-std::vector<uint32_t> collectAllLiveRowIDs(Table& table) {
-    std::vector<uint32_t> rowIDs;
-    table.rowIndexForEachLive([&](uint32_t rowID, const std::vector<uint32_t>&) {
-        rowIDs.push_back(rowID);
-    });
-    return rowIDs;
-}
-
 std::vector<uint32_t> executeWhere(Table& table, const ParsedQuery& query) {
-    if (!query.hasWhere) return collectAllLiveRowIDs(table);
-    if (query.where.alwaysFalse) return {};
-    if (query.where.predicates.size() == 1) return table.scanPredicate(query.where.predicates.front());
-    if (query.where.connective == ParsedWhere::Connective::And)
-        return table.whereAnd(query.where.predicates);
-    return table.whereOr(query.where.predicates);
+    if (!query.where) return allLiveRowIDs(table);
+    return evaluateWhere(table, *query.where);
 }
 
 MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
@@ -738,34 +131,38 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
     MiniSQLResult result;
 
     if (query.selectItems.size() == 1 && query.selectItems[0].kind == SelectItem::Kind::Star) {
-        cols.reserve(table.numColumns());
-        result.headers.reserve(table.numColumns());
         for (uint16_t c = 0; c < table.numColumns(); ++c) {
             cols.push_back(c);
             result.headers.push_back("c" + std::to_string(c));
         }
     } else {
-        cols.reserve(query.selectItems.size());
-        result.headers.reserve(query.selectItems.size());
         for (const auto& item : query.selectItems) {
             cols.push_back(item.column.index);
-            result.headers.push_back(item.column.text);
+            result.headers.push_back(item.header());
         }
     }
 
+    // Without ORDER BY, LIMIT/OFFSET can stop materializing early.
     const auto rowIDs = executeWhere(table, query);
-    result.rows.reserve(rowIDs.size());
-    for (uint32_t rowID : rowIDs) {
-        auto row = table.fetchTypedRow(rowID);
+    size_t begin = 0;
+    size_t end = rowIDs.size();
+    if (query.orderBy.empty()) {
+        begin = static_cast<size_t>(std::min<uint64_t>(query.offset, rowIDs.size()));
+        if (query.hasLimit) end = static_cast<size_t>(std::min<uint64_t>(begin + query.limit, end));
+    }
+
+    result.rows.reserve(end - begin);
+    for (size_t i = begin; i < end; ++i) {
         std::vector<std::string> outRow;
         outRow.reserve(cols.size());
         bool ok = true;
         for (uint16_t c : cols) {
-            if (!row[c]) {
+            auto v = table.fetchTypedValue(rowIDs[i], c);
+            if (!v) {
                 ok = false;
                 break;
             }
-            outRow.push_back(formatColValue(*row[c]));
+            outRow.push_back(formatColValue(*v));
         }
         if (ok) result.rows.push_back(std::move(outRow));
     }
@@ -774,16 +171,13 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
 
 AggregateState computeAggregate(Table& table, const std::vector<uint32_t>& rowIDs, const SelectItem& item) {
     AggregateState state;
+    if (item.kind == SelectItem::Kind::CountStar) {
+        state.count = rowIDs.size();
+        return state;
+    }
     for (uint32_t rowID : rowIDs) {
-        auto row = table.fetchTypedRow(rowID);
-        if (item.kind == SelectItem::Kind::CountStar) {
-            ++state.count;
-            continue;
-        }
-        const auto& cell = row[item.column.index];
+        auto cell = table.fetchTypedValue(rowID, item.column.index);
         if (!cell) continue;
-        if (cell->type == ColType::STRING)
-            throw std::invalid_argument("aggregate functions require numeric columns");
         if (!state.hasValue) {
             state.min = *cell;
             state.max = *cell;
@@ -798,158 +192,77 @@ AggregateState computeAggregate(Table& table, const std::vector<uint32_t>& rowID
     return state;
 }
 
-MiniSQLResult executeScalarAggregateQuery(Table& table, const ParsedQuery& query) {
-    const auto& item = query.selectItems.front();
-    const auto rowIDs = executeWhere(table, query);
-    const auto state = computeAggregate(table, rowIDs, item);
-
-    MiniSQLResult result;
+std::string formatAggregate(const SelectItem& item, const AggregateState& state) {
     switch (item.kind) {
         case SelectItem::Kind::CountStar:
-            result.headers.push_back("count(*)");
-            result.rows.push_back({std::to_string(state.count)});
-            return result;
+        case SelectItem::Kind::Count:
+            return std::to_string(state.count);
         case SelectItem::Kind::Sum:
-            result.headers.push_back("sum(" + item.column.text + ")");
-            result.rows.push_back({state.count == 0 ? "0" : formatColValue(ColValue(static_cast<double>(state.sum)))});
-            return result;
+            return state.count == 0 ? "0" : formatColValue(ColValue(static_cast<double>(state.sum)));
         case SelectItem::Kind::Min:
-            result.headers.push_back("min(" + item.column.text + ")");
-            result.rows.push_back({state.hasValue ? formatColValue(state.min) : ""});
-            return result;
+            return state.hasValue ? formatColValue(state.min) : "";
         case SelectItem::Kind::Max:
-            result.headers.push_back("max(" + item.column.text + ")");
-            result.rows.push_back({state.hasValue ? formatColValue(state.max) : ""});
-            return result;
+            return state.hasValue ? formatColValue(state.max) : "";
         case SelectItem::Kind::Avg: {
-            result.headers.push_back("avg(" + item.column.text + ")");
             std::ostringstream out;
             out << (state.count == 0 ? 0.0L : state.sum / static_cast<long double>(state.count));
-            result.rows.push_back({out.str()});
-            return result;
+            return out.str();
         }
         default:
-            throw std::invalid_argument("not an aggregate query");
+            throw std::invalid_argument("not an aggregate");
     }
+}
+
+MiniSQLResult executeScalarAggregateQuery(Table& table, const ParsedQuery& query) {
+    const auto rowIDs = executeWhere(table, query);
+    MiniSQLResult result;
+    std::vector<std::string> row;
+    for (const auto& item : query.selectItems) {
+        result.headers.push_back(item.header());
+        row.push_back(formatAggregate(item, computeAggregate(table, rowIDs, item)));
+    }
+    result.rows.push_back(std::move(row));
+    return result;
+}
+
+template <typename Map, typename Format>
+void appendSortedGroups(const Map& groups, MiniSQLResult& result, Format format) {
+    std::vector<std::pair<typename Map::key_type, typename Map::mapped_type>> rows(groups.begin(), groups.end());
+    std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    for (const auto& [key, value] : rows) result.rows.push_back({std::to_string(key), format(value)});
 }
 
 MiniSQLResult executeGroupByQuery(Engine& engine, const ParsedQuery& query) {
     MiniSQLResult result;
-    result.headers.push_back(query.selectItems[0].column.text);
-
     const auto& agg = query.selectItems[1];
+    result.headers = {query.selectItems[0].header(), agg.header()};
+    const auto toStr = [](const auto& v) { return std::to_string(v); };
+
     switch (agg.kind) {
-        case SelectItem::Kind::CountStar: {
-            result.headers.push_back("count(*)");
-            auto groups = engine.groupCount(query.tableName, query.groupBy.index);
-            std::vector<std::pair<ValueType, uint64_t>> rows(groups.begin(), groups.end());
-            std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-            for (const auto& [key, value] : rows)
-                result.rows.push_back({std::to_string(key), std::to_string(value)});
+        case SelectItem::Kind::CountStar:
+        case SelectItem::Kind::Count:
+            appendSortedGroups(engine.groupCount(query.tableName, query.groupBy.index), result, toStr);
             return result;
-        }
-        case SelectItem::Kind::Sum: {
-            result.headers.push_back("sum(" + agg.column.text + ")");
-            auto groups = engine.groupSum(query.tableName, query.groupBy.index, agg.column.index);
-            std::vector<std::pair<ValueType, uint64_t>> rows(groups.begin(), groups.end());
-            std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-            for (const auto& [key, value] : rows)
-                result.rows.push_back({std::to_string(key), std::to_string(value)});
+        case SelectItem::Kind::Sum:
+            appendSortedGroups(engine.groupSum(query.tableName, query.groupBy.index, agg.column.index), result, toStr);
             return result;
-        }
-        case SelectItem::Kind::Min: {
-            result.headers.push_back("min(" + agg.column.text + ")");
-            auto groups = engine.groupMin(query.tableName, query.groupBy.index, agg.column.index);
-            std::vector<std::pair<ValueType, ValueType>> rows(groups.begin(), groups.end());
-            std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-            for (const auto& [key, value] : rows)
-                result.rows.push_back({std::to_string(key), std::to_string(value)});
+        case SelectItem::Kind::Min:
+            appendSortedGroups(engine.groupMin(query.tableName, query.groupBy.index, agg.column.index), result, toStr);
             return result;
-        }
-        case SelectItem::Kind::Max: {
-            result.headers.push_back("max(" + agg.column.text + ")");
-            auto groups = engine.groupMax(query.tableName, query.groupBy.index, agg.column.index);
-            std::vector<std::pair<ValueType, ValueType>> rows(groups.begin(), groups.end());
-            std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-            for (const auto& [key, value] : rows)
-                result.rows.push_back({std::to_string(key), std::to_string(value)});
+        case SelectItem::Kind::Max:
+            appendSortedGroups(engine.groupMax(query.tableName, query.groupBy.index, agg.column.index), result, toStr);
             return result;
-        }
-        case SelectItem::Kind::Avg: {
-            result.headers.push_back("avg(" + agg.column.text + ")");
-            auto groups = engine.groupAvg(query.tableName, query.groupBy.index, agg.column.index);
-            std::vector<std::pair<ValueType, double>> rows(groups.begin(), groups.end());
-            std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-            for (const auto& [key, value] : rows) {
-                std::ostringstream out;
-                out << value;
-                result.rows.push_back({std::to_string(key), out.str()});
-            }
+        case SelectItem::Kind::Avg:
+            appendSortedGroups(engine.groupAvg(query.tableName, query.groupBy.index, agg.column.index), result,
+                               [](double v) {
+                                   std::ostringstream out;
+                                   out << v;
+                                   return out.str();
+                               });
             return result;
-        }
         default:
             throw std::invalid_argument("unsupported GROUP BY aggregate");
     }
-}
-
-const char* colTypeName(ColType type) {
-    switch (type) {
-        case ColType::UINT32: return "UINT32";
-        case ColType::INT64: return "INT64";
-        case ColType::FLOAT: return "FLOAT";
-        case ColType::DOUBLE: return "DOUBLE";
-        case ColType::STRING: return "STRING";
-    }
-    return "UNKNOWN";
-}
-
-// Converts a VALUES literal into a ColValue of exactly the column's type, so the
-// storage layer (which reads the union member matching the column type) sees valid data.
-ColValue coerceLiteral(const Token& token, ColType type, size_t colIdx) {
-    const std::string where = " for column c" + std::to_string(colIdx);
-    if (type == ColType::STRING) {
-        if (token.kind != TokenKind::String)
-            throw std::invalid_argument("expected string literal" + where);
-        return ColValue(token.text);
-    }
-    if (token.kind != TokenKind::Number)
-        throw std::invalid_argument("expected numeric literal" + where);
-
-    const std::string& text = token.text;
-    const bool isInteger = text.find_first_of(".eE") == std::string::npos;
-    errno = 0;
-    char* end = nullptr;
-    switch (type) {
-        case ColType::UINT32: {
-            if (!isInteger || text[0] == '-')
-                throw std::invalid_argument("expected non-negative integer" + where);
-            const unsigned long long v = std::strtoull(text.c_str(), &end, 10);
-            if (errno == ERANGE || v > 0xFFFFFFFFull)
-                throw std::invalid_argument("value out of UINT32 range" + where);
-            return ColValue(static_cast<uint32_t>(v));
-        }
-        case ColType::INT64: {
-            if (!isInteger) throw std::invalid_argument("expected integer" + where);
-            const long long v = std::strtoll(text.c_str(), &end, 10);
-            if (errno == ERANGE) throw std::invalid_argument("value out of INT64 range" + where);
-            return ColValue(static_cast<int64_t>(v));
-        }
-        case ColType::FLOAT: {
-            const float v = std::strtof(text.c_str(), &end);
-            if (end != text.c_str() + text.size() || errno == ERANGE)
-                throw std::invalid_argument("invalid FLOAT literal" + where);
-            return ColValue(v);
-        }
-        case ColType::DOUBLE: {
-            const double v = std::strtod(text.c_str(), &end);
-            if (end != text.c_str() + text.size() || errno == ERANGE)
-                throw std::invalid_argument("invalid DOUBLE literal" + where);
-            return ColValue(v);
-        }
-        case ColType::STRING:
-            break;
-    }
-    throw std::invalid_argument("unsupported column type" + where);
 }
 
 bool tableExists(const std::string& tableName) {
@@ -1007,9 +320,40 @@ MiniSQLResult executeInsert(Engine& engine, const ParsedStatement& stmt) {
 
 MiniSQLResult executeDelete(Engine& engine, const ParsedStatement& stmt) {
     Table& table = openExistingTable(engine, stmt.query.tableName);
-    if (stmt.query.hasWhere) validateWhere(table, stmt.query.where);
     const auto rowIDs = executeWhere(table, stmt.query);
     table.applyAtomic(rowIDs, {});
+    return rowsAffected(rowIDs.size());
+}
+
+// UPDATE is copy-on-write: matching rows are deleted and re-inserted with the new
+// values in one WAL transaction, so updated rows receive new row IDs.
+MiniSQLResult executeUpdate(Engine& engine, const ParsedStatement& stmt) {
+    Table& table = openExistingTable(engine, stmt.query.tableName);
+
+    std::vector<std::pair<uint16_t, ColValue>> sets;
+    for (const auto& a : stmt.assignments) {
+        if (a.column.index >= table.numColumns())
+            throw std::invalid_argument("column " + a.column.text + " out of bounds");
+        sets.emplace_back(a.column.index,
+                          coerceLiteral(a.literal, table.columnFile(a.column.index).colType(), a.column.index));
+    }
+
+    const auto rowIDs = executeWhere(table, stmt.query);
+    std::vector<std::vector<ColValue>> newRows;
+    newRows.reserve(rowIDs.size());
+    for (uint32_t rowID : rowIDs) {
+        auto old = table.fetchTypedRow(rowID);
+        std::vector<ColValue> row;
+        row.reserve(old.size());
+        for (auto& cell : old) {
+            if (!cell) throw std::runtime_error("row " + std::to_string(rowID) + " vanished during UPDATE");
+            row.push_back(std::move(*cell));
+        }
+        for (const auto& [col, value] : sets) row[col] = value;
+        newRows.push_back(std::move(row));
+    }
+
+    table.applyAtomic(rowIDs, newRows);
     return rowsAffected(rowIDs.size());
 }
 
@@ -1028,11 +372,14 @@ bool outputColumnIsNumeric(const Table& table, const ParsedQuery& query, size_t 
     if (first.kind == SelectItem::Kind::Star)
         return table.columnFile(static_cast<uint16_t>(idx)).colType() != ColType::STRING;
     const auto& item = query.selectItems[idx];
-    if (item.kind != SelectItem::Kind::Column) return true;
-    return table.columnFile(item.column.index).colType() != ColType::STRING;
+    if (item.kind == SelectItem::Kind::Column || item.kind == SelectItem::Kind::Min ||
+        item.kind == SelectItem::Kind::Max)
+        return table.columnFile(item.column.index).colType() != ColType::STRING;
+    return true;
 }
 
-void applyOrderAndLimit(const Table& table, const ParsedQuery& query, MiniSQLResult& result) {
+void applyOrderAndLimit(const Table& table, const ParsedQuery& query, MiniSQLResult& result,
+                        bool limitAlreadyApplied) {
     if (!query.orderBy.empty()) {
         struct ResolvedKey {
             size_t idx;
@@ -1076,10 +423,10 @@ void applyOrderAndLimit(const Table& table, const ParsedQuery& query, MiniSQLRes
                          });
     }
 
-    if (query.hasLimit || query.offset > 0) {
-        const size_t begin = std::min<uint64_t>(query.offset, result.rows.size());
+    if (!limitAlreadyApplied && (query.hasLimit || query.offset > 0)) {
+        const size_t begin = static_cast<size_t>(std::min<uint64_t>(query.offset, result.rows.size()));
         size_t end = result.rows.size();
-        if (query.hasLimit) end = std::min<uint64_t>(begin + query.limit, end);
+        if (query.hasLimit) end = static_cast<size_t>(std::min<uint64_t>(begin + query.limit, end));
         result.rows = std::vector<std::vector<std::string>>(result.rows.begin() + begin,
                                                             result.rows.begin() + end);
     }
@@ -1089,32 +436,34 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
     Table& table = openExistingTable(engine, query.tableName);
     validateQueryShape(table, query);
 
-    MiniSQLResult result;
     bool aggregateQuery = false;
-    for (const auto& item : query.selectItems) {
-        if (item.kind != SelectItem::Kind::Column && item.kind != SelectItem::Kind::Star) {
-            aggregateQuery = true;
-            break;
-        }
-    }
-    if (query.hasGroupBy) result = executeGroupByQuery(engine, query);
-    else if (aggregateQuery) result = executeScalarAggregateQuery(table, query);
-    else result = executeProjectionQuery(table, query);
+    for (const auto& item : query.selectItems) aggregateQuery = aggregateQuery || item.isAggregate();
 
-    applyOrderAndLimit(table, query, result);
+    MiniSQLResult result;
+    bool limitApplied = false;
+    if (query.hasGroupBy) {
+        result = executeGroupByQuery(engine, query);
+    } else if (aggregateQuery) {
+        result = executeScalarAggregateQuery(table, query);
+    } else {
+        result = executeProjectionQuery(table, query);
+        limitApplied = query.orderBy.empty();
+    }
+
+    applyOrderAndLimit(table, query, result, limitApplied);
     return result;
 }
 
 } // namespace
 
-MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sql) {
-    const auto tokens = Tokenizer(sql).tokenize();
-    const ParsedStatement stmt = Parser(tokens).parse();
+MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText) {
+    const ParsedStatement stmt = sql::parse(sqlText);
     switch (stmt.kind) {
         case ParsedStatement::Kind::CreateTable: return executeCreateTable(engine, stmt);
         case ParsedStatement::Kind::Insert: return executeInsert(engine, stmt);
         case ParsedStatement::Kind::Delete: return executeDelete(engine, stmt);
         case ParsedStatement::Kind::Describe: return executeDescribe(engine, stmt);
+        case ParsedStatement::Kind::Update: return executeUpdate(engine, stmt);
         case ParsedStatement::Kind::Select: break;
     }
     return executeSelect(engine, stmt.query);

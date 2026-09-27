@@ -112,7 +112,11 @@ int main() {
             assert((r.rows[2] == std::vector<std::string>{"3", "40"}));
         }
 
-        assertThrows("SELECT c0 FROM '/tmp/sql_main' WHERE c0 = 1 AND c1 = 20 OR c2 = 'bob'", e);
+        {
+            // AND binds tighter than OR: (c0 = 1 AND c1 = 20) OR c2 = 'bob'
+            auto r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_main' WHERE c0 = 1 AND c1 = 20 OR c2 = 'bob'");
+            assert(r.rows.size() == 1 && r.rows[0][0] == "2");
+        }
         assertThrows("SELECT c9 FROM '/tmp/sql_main'", e);
         assertThrows("SELECT c0 FROM '/tmp/sql_main' GROUP BY c0", e);
         assertThrows("SELECT c0, count(*) FROM '/tmp/sql_main' WHERE c0 = 1 GROUP BY c0", e);
@@ -228,8 +232,9 @@ int main() {
         }
         assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c3 < 5", e);   // non-UINT32 column
         assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c9 < 0", e);   // bad column even if empty range
-        assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c0 = 1.5", e); // non-integer literal
-        assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c0 <> 1", e);
+        // A non-integer literal can never equal a UINT32 value.
+        assert(executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 = 1.5").rows.empty());
+        assert(executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 <> 1").rows.size() == 4);
 
         // ORDER BY / LIMIT / OFFSET
         {
