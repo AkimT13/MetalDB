@@ -1,5 +1,8 @@
 // RowIndex.cpp
 #include "RowIndex.hpp"
+#include <cerrno>
+#include <stdexcept>
+#include <string>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -113,11 +116,12 @@ void RowIndex::writeEntry(uint32_t rowID, const Entry& e) {
     const size_t entrySize = 1 + 3 + sizeof(uint32_t) * numColumns_;
     off_t pos = base + off_t(rowID) * off_t(entrySize);
 
-    if (lseek(fd_, pos, SEEK_SET) == (off_t)-1) perror("lseek(writeEntry)");
-    uint8_t pad[3] = {0,0,0};
-    if (write(fd_, &e.status, 1) != 1) perror("write(status)");
-    if (write(fd_, pad, 3) != 3) perror("write(pad)");
-    if (write(fd_, e.slots.data(), sizeof(uint32_t) * numColumns_) != (ssize_t)(sizeof(uint32_t) * numColumns_)) perror("write(slots)");
+    // Single pwrite per entry: status byte, 3 pad bytes, then the slot IDs.
+    std::vector<uint8_t> buf(entrySize, 0);
+    buf[0] = e.status;
+    std::memcpy(buf.data() + 4, e.slots.data(), sizeof(uint32_t) * numColumns_);
+    if (pwrite(fd_, buf.data(), buf.size(), pos) != (ssize_t)buf.size())
+        throw std::runtime_error(std::string("RowIndex write failed: ") + std::strerror(errno));
 }
 
 std::optional<std::vector<uint32_t>> RowIndex::fetch(uint32_t rowID) const {

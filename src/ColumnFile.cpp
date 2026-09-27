@@ -1,6 +1,9 @@
 // ColumnFile.cpp
 #include "ColumnFile.hpp"
 #include "ValueTypes.hpp"
+#include <cerrno>
+#include <stdexcept>
+#include <string>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cassert>
@@ -175,16 +178,15 @@ void ColumnFile::flushPage(const ColumnPage &page) {
     hdr.minValue     = static_cast<uint32_t>(copy.minValue);
     hdr.maxValue     = static_cast<uint32_t>(copy.maxValue);
 
-    if (pwrite(fd_, &hdr, sizeof(hdr), base) != ssize_t(sizeof(hdr))) {
-        std::perror("ColumnFile::flushPage pwrite(header)"); return;
-    }
+    if (pwrite(fd_, &hdr, sizeof(hdr), base) != ssize_t(sizeof(hdr)))
+        throw std::runtime_error(std::string("ColumnFile::flushPage header write failed: ") + std::strerror(errno));
 
     const size_t valuesBytes = size_t(copy.capacity) * valueBytes_;
     const off_t  valuesOff   = base + sizeof(DiskPageHeader);
     if (valuesBytes) {
         if (pwrite(fd_, copy.rawValues.data(), valuesBytes, valuesOff)
                 != ssize_t(valuesBytes)) {
-            std::perror("ColumnFile::flushPage pwrite(values)"); return;
+            throw std::runtime_error(std::string("ColumnFile::flushPage values write failed: ") + std::strerror(errno));
         }
     }
 
@@ -195,7 +197,7 @@ void ColumnFile::flushPage(const ColumnPage &page) {
         for (size_t i = 0; i < copy.capacity; ++i)
             tmp[i] = copy.tombstone[i] ? 1u : 0u;
         if (pwrite(fd_, tmp.data(), tombBytes, tombOff) != ssize_t(tombBytes))
-            std::perror("ColumnFile::flushPage pwrite(tombstone)");
+            throw std::runtime_error(std::string("ColumnFile::flushPage tombstone write failed: ") + std::strerror(errno));
     }
 
     // Keep the in-memory cache in sync with what was just written
@@ -234,8 +236,8 @@ uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
             off_t end = lseek(heapFd_, 0, SEEK_END);
             uint32_t heapOff = static_cast<uint32_t>(end);
             uint32_t len     = static_cast<uint32_t>(val.str.size());
-            if (len > 0)
-                pwrite(heapFd_, val.str.data(), len, end);
+            if (len > 0 && pwrite(heapFd_, val.str.data(), len, end) != ssize_t(len))
+                throw std::runtime_error(std::string("string heap write failed: ") + std::strerror(errno));
             uint32_t pair[2] = { heapOff, len };
             page.writeRaw(slot, pair, 8);
             break;
@@ -275,8 +277,8 @@ std::optional<ColValue> ColumnFile::fetchTypedSlot(uint32_t id) const {
             page.readRaw(slot, pair, 8);
             uint32_t off = pair[0], len = pair[1];
             std::string s(len, '\0');
-            if (len > 0)
-                pread(heapFd_, s.data(), len, off);
+            if (len > 0 && pread(heapFd_, s.data(), len, off) != ssize_t(len))
+                throw std::runtime_error("string heap read failed (truncated or corrupt heap)");
             return ColValue(std::move(s));
         }
     }
@@ -319,8 +321,8 @@ void ColumnFile::packStringsForGPU(const std::vector<uint32_t>& slotIDs,
     // Read the entire heap file in one shot to avoid per-string pread syscalls.
     off_t heapSize = (heapFd_ >= 0) ? lseek(heapFd_, 0, SEEK_END) : 0;
     std::vector<char> heap(heapSize > 0 ? heapSize : 0);
-    if (heapSize > 0)
-        pread(heapFd_, heap.data(), static_cast<size_t>(heapSize), 0);
+    if (heapSize > 0 && pread(heapFd_, heap.data(), static_cast<size_t>(heapSize), 0) != ssize_t(heapSize))
+        throw std::runtime_error("string heap read failed");
 
     outChars.clear();
     outOffsets.resize(n + 1);
