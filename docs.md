@@ -84,6 +84,12 @@ Write / catalog statements:
 - every write statement is atomic: all rows are validated first, then logged as a
   single WAL transaction
 - `DESCRIBE '/tmp/demo'` — lists columns and types
+- `EXPLAIN <statement>` — one `plan` column describing each stage: table size and GPU
+  availability, every WHERE leaf's access path (GPU vs CPU and why, zone-map range
+  scans, complements), aggregation strategy, sort, and actual row counts / timings.
+  SELECTs are executed; for DELETE / UPDATE only the WHERE clause is evaluated and
+  nothing is written.
+- REPL: `.timer on` prints execution time after each statement
 - `INSERT` / `DELETE` return a single `rows_affected` column; `CREATE TABLE` returns `created`
 - writes go through the table WAL; use `mdb flush <table>` for an explicit durable checkpoint
 - string literals escape a single quote as `''`

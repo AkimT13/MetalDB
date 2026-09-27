@@ -3,6 +3,7 @@
 #include "MiniSQL.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -20,9 +21,34 @@
 #include "ValueTypes.hpp"
 #include "WhereEval.hpp"
 
+extern "C" bool metalIsAvailable();
+
 using namespace sql;
 
 namespace {
+
+// ── EXPLAIN tracing ──────────────────────────────────────────────────────────
+// While an EXPLAIN runs, g_trace collects plan lines from the stages below.
+// thread_local so concurrent sessions (server threads) never share a trace.
+struct Trace {
+    std::vector<std::string> lines;
+    void add(const std::string& line) { lines.push_back(line); }
+};
+thread_local Trace* g_trace = nullptr;
+
+void trace(const std::string& line) {
+    if (g_trace) g_trace->add(line);
+}
+
+double msSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+std::string fmtMs(double ms) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.3f ms", ms);
+    return buf;
+}
 
 // ── value formatting ─────────────────────────────────────────────────────────
 
@@ -200,8 +226,20 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
 // ── SELECT execution ─────────────────────────────────────────────────────────
 
 std::vector<uint32_t> executeWhere(Table& table, const ParsedQuery& query) {
-    if (!query.where) return allLiveRowIDs(table);
-    return evaluateWhere(table, *query.where);
+    const auto start = std::chrono::steady_clock::now();
+    if (!query.where) {
+        auto ids = allLiveRowIDs(table);
+        trace("Filter: none (all " + std::to_string(ids.size()) + " live rows)");
+        return ids;
+    }
+    std::vector<std::string> leaves;
+    auto ids = evaluateWhere(table, *query.where, g_trace ? &leaves : nullptr);
+    if (g_trace) {
+        trace("Filter: " + whereToString(*query.where));
+        for (const auto& leaf : leaves) trace("  -> " + leaf);
+        trace("  matched " + std::to_string(ids.size()) + " rows in " + fmtMs(msSince(start)));
+    }
+    return ids;
 }
 
 MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
@@ -227,6 +265,9 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
         if (query.hasLimit) end = static_cast<size_t>(std::min<uint64_t>(begin + query.limit, end));
     }
 
+    trace("Project: " + std::to_string(cols.size()) + " column(s), materializing " +
+          std::to_string(end - begin) + " of " + std::to_string(rowIDs.size()) + " rows" +
+          (query.orderBy.empty() && query.hasLimit ? " (LIMIT pushed down)" : ""));
     result.rows.reserve(end - begin);
     for (size_t i = begin; i < end; ++i) {
         std::vector<std::string> outRow;
@@ -247,6 +288,7 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
 
 MiniSQLResult executeScalarAggregateQuery(Table& table, const ParsedQuery& query) {
     const auto rowIDs = executeWhere(table, query);
+    trace("Aggregate: scalar over " + std::to_string(rowIDs.size()) + " rows");
     MiniSQLResult result;
     std::vector<std::string> row;
     for (const auto& item : query.selectItems) {
@@ -296,6 +338,9 @@ bool tryFastGroupBy(Engine& engine, Table& table, const ParsedQuery& query,
         }
     }
 
+    trace("Aggregate: GPU-capable group-by on " + keys[0].text + " (GroupBy::countByKey / sumByKey; " +
+          (table.useGPU() && metalIsAvailable() && table.rowCount() >= table.gpuThreshold() ? "GPU" : "CPU") +
+          " for " + std::to_string(table.rowCount()) + " rows)");
     const auto counts = engine.groupCount(query.tableName, keyCol);
     std::unordered_map<uint16_t, std::unordered_map<ValueType, uint64_t>> sums;
     for (const auto& item : query.selectItems)
@@ -380,6 +425,11 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
         }
     }
 
+    if (g_trace) {
+        std::string keyText;
+        for (const auto& k : keys) keyText += (keyText.empty() ? "" : ", ") + k.text;
+        trace("Aggregate: CPU hash aggregation on (" + keyText + "), " + std::to_string(groups.size()) + " groups");
+    }
     std::sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) {
         for (size_t k = 0; k < a.key.size(); ++k) {
             if (a.key[k] < b.key[k]) return true;
@@ -600,7 +650,59 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
         limitApplied = query.orderBy.empty();
     }
 
+    if (!query.orderBy.empty()) trace("Sort: " + std::to_string(query.orderBy.size()) + " key(s), " +
+                                      std::to_string(result.rows.size()) + " rows");
     applyOrderAndLimit(query, result, limitApplied);
+    return result;
+}
+
+const char* statementName(ParsedStatement::Kind kind) {
+    switch (kind) {
+        case ParsedStatement::Kind::Select: return "SELECT";
+        case ParsedStatement::Kind::CreateTable: return "CREATE TABLE";
+        case ParsedStatement::Kind::Insert: return "INSERT";
+        case ParsedStatement::Kind::Delete: return "DELETE";
+        case ParsedStatement::Kind::Update: return "UPDATE";
+        case ParsedStatement::Kind::Describe: return "DESCRIBE";
+    }
+    return "?";
+}
+
+// EXPLAIN runs SELECTs for real (so timings and row counts are actual), and for
+// DELETE / UPDATE evaluates only the WHERE clause — nothing is written.
+MiniSQLResult executeExplain(Engine& engine, const ParsedStatement& stmt) {
+    Trace t;
+    g_trace = &t;
+    struct Reset {
+        ~Reset() { g_trace = nullptr; }
+    } reset;
+
+    const auto start = std::chrono::steady_clock::now();
+    t.add(std::string("Statement: ") + statementName(stmt.kind));
+    if (stmt.kind == ParsedStatement::Kind::Select || stmt.kind == ParsedStatement::Kind::Delete ||
+        stmt.kind == ParsedStatement::Kind::Update) {
+        Table& table = openExistingTable(engine, stmt.query.tableName);
+        t.add("Table: '" + stmt.query.tableName + "' (" + std::to_string(table.rowCount()) + " live rows, " +
+              std::to_string(table.numColumns()) + " columns; GPU " +
+              (!table.useGPU() ? "disabled" : metalIsAvailable() ? "available" : "unavailable") +
+              ", threshold " + std::to_string(table.gpuThreshold()) + " rows)");
+        if (stmt.kind == ParsedStatement::Kind::Select) {
+            const auto result = executeSelect(engine, stmt.query);
+            t.add("Output: " + std::to_string(result.rows.size()) + " rows");
+        } else {
+            const auto ids = executeWhere(table, stmt.query);
+            t.add(std::string("Write: would ") + (stmt.kind == ParsedStatement::Kind::Delete ? "delete " : "rewrite ") +
+                  std::to_string(ids.size()) + " rows as one WAL transaction (not executed)");
+        }
+    } else {
+        t.add("(no plan: statement is executed directly)");
+    }
+    t.add("Total: " + fmtMs(msSince(start)));
+
+    MiniSQLResult result;
+    result.headers = {"plan"};
+    result.types = {ColType::STRING};
+    for (auto& line : t.lines) result.rows.push_back({std::move(line)});
     return result;
 }
 
@@ -608,6 +710,7 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
 
 MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText) {
     const ParsedStatement stmt = sql::parse(sqlText);
+    if (stmt.explain) return executeExplain(engine, stmt);
     switch (stmt.kind) {
         case ParsedStatement::Kind::CreateTable: return executeCreateTable(engine, stmt);
         case ParsedStatement::Kind::Insert: return executeInsert(engine, stmt);

@@ -327,6 +327,32 @@ int main() {
     std::remove("/tmp/sql_upd.mdb.wal");
     std::remove("/tmp/sql_upd.mdb.2.str");
 
+    // EXPLAIN
+    {
+        Engine e;
+        auto plan = executeMiniSQL(e, "EXPLAIN SELECT c2, count(*) FROM '/tmp/sql_main' WHERE c0 >= 2 AND c2 != 'bob' GROUP BY c2");
+        assert((plan.headers == std::vector<std::string>{"plan"}));
+        std::string text;
+        for (const auto& row : plan.rows) text += row[0] + "\n";
+        assert(text.find("Statement: SELECT") != std::string::npos);
+        assert(text.find("range scan [2, 4294967295]") != std::string::npos);
+        assert(text.find("string equality scan") != std::string::npos);
+        assert(text.find("CPU hash aggregation on (c2), 2 groups") != std::string::npos);
+        assert(text.find("Output: 2 rows") != std::string::npos);
+
+        plan = executeMiniSQL(e, "EXPLAIN DELETE FROM '/tmp/sql_main' WHERE c0 = 2");
+        text.clear();
+        for (const auto& row : plan.rows) text += row[0] + "\n";
+        assert(text.find("would delete 2 rows") != std::string::npos);
+        auto r = executeMiniSQL(e, "SELECT count(*) FROM '/tmp/sql_main'");
+        assert(r.rows[0][0] == "4");  // EXPLAIN DELETE wrote nothing
+
+        const std::string replOut = captureCommand(
+            "printf \".timer on\nSELECT count(*) FROM '/tmp/sql_main';\n.quit\n\" | ./mdb repl 2>&1");
+        assert(replOut.find("count(*)\n4\n") != std::string::npos);
+        assert(replOut.find("Time: ") != std::string::npos);
+    }
+
     // ORDER BY over GROUP BY output
     {
         Engine e;

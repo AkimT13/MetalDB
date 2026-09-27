@@ -360,6 +360,19 @@ GROUP BY cases in `test_mini_sql`.
 
 ---
 
+### EXPLAIN + REPL Timing (complete)
+
+`EXPLAIN <statement>` returns the executed plan as rows of text: table size and GPU
+availability/threshold, each WHERE leaf's access path (e.g. `range scan [2, 4294967295]
+with zone-map page pruning (GPU: 250000 rows)`, `CPU typed scan (DOUBLE)`, complement
+steps), rows matched and filter time, aggregation strategy (GPU-capable group-by vs CPU
+hash aggregation + group count), LIMIT push-down, sort, output rows, total time.
+`EXPLAIN DELETE / UPDATE` evaluates only the WHERE clause and reports how many rows
+would be rewritten — nothing is written. Tracing uses a `thread_local` collector so
+concurrent sessions never mix plans. REPL gains `.timer on|off`.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility
