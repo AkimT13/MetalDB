@@ -422,6 +422,31 @@ exhaustion leaves a reopenable table, geometry validation.
 
 ---
 
+### Concurrent Server (complete)
+
+The server previously handled one client at a time and gave each connection its own
+`Engine`, so sessions had independent in-memory caches of the same table files. Now:
+
+- one shared `Engine`; its registry is mutex-protected and every mini-SQL statement
+  takes a per-table lock (`Engine::tableMutex`), so statements on one table are
+  serialized (reads populate page caches, so they are not lock-free) while different
+  tables run in parallel. Metal pipeline init was already double-checked-locked.
+- thread per connection with `--max-connections`, `--idle-timeout`, 16 MiB request cap,
+  `--bind`, `--sync-commit`, `--verbose`
+- `--data-dir` sandbox (`Engine::setDataDir` / `resolveTableBase` / `resolveFile`):
+  rejects absolute paths and `..` for table names and COPY files
+- SIGPIPE ignored (a client disconnecting mid-response used to kill the server)
+- graceful SIGINT/SIGTERM shutdown: drain sessions, `Engine::flushAll()` checkpoint, exit 0
+- `Engine::groupCount/groupSum` now honor the table's `setUseGPU` / `setGPUThreshold`
+
+Coverage: `test_server_concurrency` — 4 parallel writers + readers on one table and a
+writer on another (no lost rows, table verifies clean), connection limit, oversized
+request, graceful shutdown with a live session (exit 0, WAL checkpointed), sandbox path
+rejection, idle timeout. Also run under ThreadSanitizer (clean after fixing a
+tracker-lifetime race it found in the shutdown path).
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility

@@ -462,13 +462,8 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
     return result;
 }
 
-bool tableExists(const std::string& tableName) {
-    const std::string tablePath = tableName + ".mdb";
-    return access(tablePath.c_str(), F_OK) == 0;
-}
-
 Table& openExistingTable(Engine& engine, const std::string& tableName) {
-    if (!tableExists(tableName))
+    if (!engine.tableExists(tableName))
         throw std::invalid_argument("table does not exist");
     return engine.openTable(tableName);
 }
@@ -483,7 +478,7 @@ MiniSQLResult rowsAffected(size_t n) {
 
 MiniSQLResult executeCreateTable(Engine& engine, const ParsedStatement& stmt) {
     const std::string& name = stmt.query.tableName;
-    if (tableExists(name))
+    if (engine.tableExists(name))
         throw std::invalid_argument("table already exists");
     engine.createTypedTable(name, stmt.columnTypes);
 
@@ -667,7 +662,7 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
 // import does not leave a large WAL behind.
 MiniSQLResult executeCopyFrom(Engine& engine, const ParsedStatement& stmt) {
     Table& table = openExistingTable(engine, stmt.query.tableName);
-    std::ifstream in(stmt.copyFile, std::ios::binary);
+    std::ifstream in(engine.resolveFile(stmt.copyFile), std::ios::binary);
     if (!in) throw std::invalid_argument("cannot open '" + stmt.copyFile + "' for reading");
 
     std::vector<std::vector<ColValue>> rows;
@@ -725,7 +720,8 @@ MiniSQLResult executeCopyTo(Engine& engine, const ParsedStatement& stmt) {
         data = executeSelect(engine, all);
     }
 
-    const std::string tmp = stmt.copyFile + ".tmp";
+    const std::string target = engine.resolveFile(stmt.copyFile);
+    const std::string tmp = target + ".tmp";
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out) throw std::invalid_argument("cannot open '" + stmt.copyFile + "' for writing");
@@ -734,7 +730,7 @@ MiniSQLResult executeCopyTo(Engine& engine, const ParsedStatement& stmt) {
         out.flush();
         if (!out) throw std::runtime_error("write to '" + tmp + "' failed");
     }
-    if (std::rename(tmp.c_str(), stmt.copyFile.c_str()) != 0) {
+    if (std::rename(tmp.c_str(), target.c_str()) != 0) {
         std::remove(tmp.c_str());
         throw std::runtime_error("cannot move export into place at '" + stmt.copyFile + "'");
     }
@@ -796,6 +792,10 @@ MiniSQLResult executeExplain(Engine& engine, const ParsedStatement& stmt) {
 
 MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText) {
     const ParsedStatement stmt = sql::parse(sqlText);
+    // Every statement touches exactly one table; serialize statements per table so
+    // concurrent sessions (server threads) never share a Table's mutable caches.
+    (void)engine.resolveTableBase(stmt.query.tableName);  // sandbox check before locking
+    std::lock_guard<std::mutex> tableLock(engine.tableMutex(stmt.query.tableName));
     if (stmt.explain) return executeExplain(engine, stmt);
     switch (stmt.kind) {
         case ParsedStatement::Kind::CreateTable: return executeCreateTable(engine, stmt);
