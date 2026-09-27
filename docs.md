@@ -72,6 +72,11 @@ Write / catalog statements:
 - `INSERT INTO '/tmp/demo' VALUES (1, 'a'), (2, 'b')` — literals are coerced to each
   column's type and the whole statement is validated before any row is written
 - `DELETE FROM '/tmp/demo' [WHERE ...]` — same `WHERE` grammar as `SELECT`
+- `UPDATE '/tmp/demo' SET c1 = 5, c2 = 'x' [WHERE ...]` — copy-on-write: matching
+  rows are deleted and re-inserted with new values in one WAL transaction, so
+  updated rows get new row IDs (and move to the end of unordered scans)
+- every write statement is atomic: all rows are validated first, then logged as a
+  single WAL transaction
 - `DESCRIBE '/tmp/demo'` — lists columns and types
 - `INSERT` / `DELETE` return a single `rows_affected` column; `CREATE TABLE` returns `created`
 - writes go through the table WAL; use `mdb flush <table>` for an explicit durable checkpoint
@@ -83,7 +88,6 @@ Important limits:
 - joins, aliases, arithmetic expressions, subqueries, and CTEs are not supported
 - `ORDER BY` keys must appear in the `SELECT` list
 - `GROUP BY ... WHERE ...` is not supported yet
-- no `UPDATE` yet (see ROADMAP)
 
 Output is tab-separated with a header row.
 

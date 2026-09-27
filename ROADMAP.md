@@ -21,9 +21,8 @@ and multi-table atomicity.
 Keep old row versions instead of tombstoning. Readers never block writers. Required for snapshot
 isolation. Adds a version chain to RowIndex. High complexity.
 
-### UPDATE support
-Currently impossible. Implement as copy-on-write (delete + insert) logged atomically in WAL.
-Fits the column store model without in-place mutation.
+### UPDATE support  [DONE]
+Copy-on-write (delete + insert) logged atomically as one WAL transaction.
 
 ---
 
@@ -67,7 +66,8 @@ workflows (pandas interop, Jupyter notebooks) without a network round-trip or qu
 Parser for `SELECT col FROM table WHERE ... GROUP BY ...`. No subqueries or CTEs needed to
 cover 80% of analytical queries. Makes the engine usable without writing C++.
 v2 adds `CREATE TABLE`, `INSERT`, `DELETE`, `DESCRIBE`, `<`/`<=`/`>`/`>=`, `ORDER BY`, and
-`LIMIT`/`OFFSET`. Still missing: `UPDATE`, `!=`, mixed AND/OR, `GROUP BY` + `WHERE`, joins.
+`LIMIT`/`OFFSET`. v3 adds boolean WHERE trees (AND/OR/NOT, parens, `!=`, IN) on all types, and `UPDATE`.
+Still missing: joins, arithmetic expressions.
 
 ### Networking / Server Mode  [NEXT: POSTGRES WIRE]
 `mdb serve <port>` now exposes the mini-SQL executor over a simple loopback TCP server:

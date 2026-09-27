@@ -328,6 +328,17 @@ over 5k rows of all column types with deletions, run CPU-only and GPU-eligible.
 
 ---
 
+### UPDATE (complete)
+
+`UPDATE '<path>' SET cN = literal [, ...] [WHERE ...]`, implemented copy-on-write on
+top of `Table::applyAtomic`: matching rows are re-inserted with the new values and the
+old versions deleted in one WAL transaction, so a crash never leaves a half-applied
+UPDATE. Updated rows receive new row IDs. Values are type-coerced and validated before
+anything is logged. Coverage in `test_mini_sql` (multi-column SET, full-table UPDATE,
+no-match UPDATE, type / range / duplicate-column errors, reopen consistency).
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility

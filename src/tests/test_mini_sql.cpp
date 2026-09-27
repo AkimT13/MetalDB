@@ -266,6 +266,43 @@ int main() {
         }
     }
 
+    // UPDATE (copy-on-write, one WAL transaction)
+    std::remove("/tmp/sql_upd.mdb");
+    std::remove("/tmp/sql_upd.mdb.idx");
+    std::remove("/tmp/sql_upd.mdb.wal");
+    std::remove("/tmp/sql_upd.mdb.2.str");
+    {
+        Engine e;
+        executeMiniSQL(e, "CREATE TABLE '/tmp/sql_upd' (UINT32, DOUBLE, STRING)");
+        executeMiniSQL(e, "INSERT INTO '/tmp/sql_upd' VALUES (1, 1.5, 'a'), (2, 2.5, 'b'), (3, 3.5, 'c')");
+        auto r = executeMiniSQL(e, "UPDATE '/tmp/sql_upd' SET c1 = 9.25, c2 = 'z' WHERE c0 >= 2");
+        assert((r.headers == std::vector<std::string>{"rows_affected"}) && r.rows[0][0] == "2");
+        r = executeMiniSQL(e, "SELECT * FROM '/tmp/sql_upd' ORDER BY c0");
+        assert((r.rows == std::vector<std::vector<std::string>>{{"1", "1.5", "a"}, {"2", "9.25", "z"}, {"3", "9.25", "z"}}));
+        r = executeMiniSQL(e, "UPDATE '/tmp/sql_upd' SET c0 = 100");
+        assert(r.rows[0][0] == "3");
+        r = executeMiniSQL(e, "SELECT count(*), min(c0), max(c0) FROM '/tmp/sql_upd'");
+        assert((r.rows[0] == std::vector<std::string>{"3", "100", "100"}));
+        r = executeMiniSQL(e, "UPDATE '/tmp/sql_upd' SET c2 = 'none' WHERE c0 = 7");
+        assert(r.rows[0][0] == "0");
+        assertThrows("UPDATE '/tmp/sql_upd' SET c1 = 'text'", e);       // type mismatch
+        assertThrows("UPDATE '/tmp/sql_upd' SET c0 = -1", e);           // UINT32 range
+        assertThrows("UPDATE '/tmp/sql_upd' SET c0 = 1, c0 = 2", e);    // duplicate column
+        assertThrows("UPDATE '/tmp/sql_upd' SET c7 = 1", e);            // bad column
+        assertThrows("UPDATE '/tmp/sql_upd' c0 = 1", e);                // missing SET
+        r = executeMiniSQL(e, "SELECT c2 FROM '/tmp/sql_upd' WHERE c2 = 'z'");
+        assert(r.rows.size() == 2);  // failed UPDATEs changed nothing
+    }
+    {
+        Engine e;  // survives reopen (WAL / base files consistent)
+        auto r = executeMiniSQL(e, "SELECT c0, c2 FROM '/tmp/sql_upd' ORDER BY c2");
+        assert((r.rows == std::vector<std::vector<std::string>>{{"100", "a"}, {"100", "z"}, {"100", "z"}}));
+    }
+    std::remove("/tmp/sql_upd.mdb");
+    std::remove("/tmp/sql_upd.mdb.idx");
+    std::remove("/tmp/sql_upd.mdb.wal");
+    std::remove("/tmp/sql_upd.mdb.2.str");
+
     // ORDER BY over GROUP BY output
     {
         Engine e;

@@ -80,6 +80,16 @@ std::string sendQuery(int fd, const std::string& query) {
     return recvResponse(fd);
 }
 
+// If an assert() fires, abort() would skip stopServer() and leave an orphaned
+// server holding the test runner's stdout open; kill it from the signal handler.
+volatile pid_t g_serverPid = 0;
+
+void killServerOnAbort(int sig) {
+    if (g_serverPid > 0) ::kill(g_serverPid, SIGKILL);
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+
 pid_t spawnServer(uint16_t port) {
     const pid_t pid = fork();
     if (pid < 0) throw std::runtime_error("fork failed");
@@ -88,6 +98,9 @@ pid_t spawnServer(uint16_t port) {
         execl("./mdb", "./mdb", "serve", portArg.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
+    g_serverPid = pid;
+    std::signal(SIGABRT, killServerOnAbort);
+    std::signal(SIGSEGV, killServerOnAbort);
     return pid;
 }
 
@@ -119,7 +132,10 @@ int main() {
         assert(r2 == "OK\ncount(*)\n2\nEND\n");
 
         std::string r3 = sendQuery(fd, "SELECT c0 FROM '/tmp/sql_server' WHERE c0 = 1 AND c1 = 10 OR c2 = 'alice'");
-        assert(r3.rfind("ERR\tmixed AND/OR WHERE clauses are not supported\nEND\n", 0) == 0);
+        assert(r3 == "OK\nc0\n1\n2\nEND\n");
+
+        std::string r3b = sendQuery(fd, "SELECT c0 FROM '/tmp/sql_server' WHERE c0 = 1 AND");
+        assert(r3b.rfind("ERR\texpected predicate column", 0) == 0);
 
         std::string r4 = sendQuery(fd, "");
         assert(r4 == "ERR\tempty request\nEND\n");
