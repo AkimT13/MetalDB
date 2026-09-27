@@ -227,6 +227,39 @@ Verified:
 
 ---
 
+### Phase 9 — Mini-SQL v2: Writes, Range Comparisons, ORDER BY / LIMIT (complete)
+
+Makes the SQL surface (`mdb query`, `mdb repl`, `mdb serve`) usable end-to-end without
+dropping to C++/C/Python for table creation or writes.
+
+New statements:
+
+- `CREATE TABLE '<path>' (UINT32, INT64, FLOAT, DOUBLE, STRING ...)` (optional `cN` names)
+- `INSERT INTO '<path>' VALUES (...), (...)` — multi-row; literals coerced to column types,
+  all rows validated before any write (a bad literal leaves the table unchanged)
+- `DELETE FROM '<path>' [WHERE ...]`
+- `DESCRIBE '<path>'`
+
+Query additions:
+
+- `<`, `<=`, `>`, `>=` in `WHERE` on UINT32 columns, lowered onto the existing BETWEEN
+  path (so GPU range scans still apply). Unsatisfiable ranges such as `c0 < 0` are folded
+  away at parse time (AND → empty result, OR → term dropped).
+- `ORDER BY` on selected columns / aggregates / 1-based positions, multi-key, `ASC`/`DESC`,
+  type-aware (numeric vs. string) comparison
+- `LIMIT n [OFFSET m]`
+- tokenizer: signed and decimal numeric literals, `''` escape inside string literals;
+  integer-only contexts now reject `1.5` instead of silently truncating it
+
+Coverage: new DDL/DML, comparison, ORDER BY/LIMIT and cross-process CLI cases in
+`test_mini_sql`.
+
+Verified (CPU path, Metal entry points stubbed): `test_mini_sql`, `test_engine`,
+`test_groupby`, `test_join`, `test_compound_where`, `test_where_range`,
+`test_persist_pages`, `test_scan_hybrid`, `test_wal`, `test_server`.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility

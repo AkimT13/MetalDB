@@ -66,6 +66,8 @@ workflows (pandas interop, Jupyter notebooks) without a network round-trip or qu
 ### Query Language (mini-SQL)  [DONE, v1 CLI SURFACE]
 Parser for `SELECT col FROM table WHERE ... GROUP BY ...`. No subqueries or CTEs needed to
 cover 80% of analytical queries. Makes the engine usable without writing C++.
+v2 adds `CREATE TABLE`, `INSERT`, `DELETE`, `DESCRIBE`, `<`/`<=`/`>`/`>=`, `ORDER BY`, and
+`LIMIT`/`OFFSET`. Still missing: `UPDATE`, `!=`, mixed AND/OR, `GROUP BY` + `WHERE`, joins.
 
 ### Networking / Server Mode  [NEXT: POSTGRES WIRE]
 `mdb serve <port>` now exposes the mini-SQL executor over a simple loopback TCP server:

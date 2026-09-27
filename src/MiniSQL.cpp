@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -27,6 +30,10 @@ enum class TokenKind {
     LParen,
     RParen,
     Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
     Semicolon,
     End,
 };
@@ -65,6 +72,16 @@ struct ParsedWhere {
     std::vector<Predicate> predicates;
     Connective connective = Connective::And;
     bool hasConnective = false;
+    // Range comparisons that can never match (e.g. `c0 < 0`) are dropped from
+    // `predicates`; their columns are kept here so they are still validated.
+    std::vector<uint16_t> emptyRangeCols;
+    bool alwaysFalse = false;
+};
+
+struct OrderKey {
+    std::string header;   // output column header to sort on (e.g. "c1", "count(*)")
+    size_t position = 0;  // 1-based output position when ordered by number; 0 otherwise
+    bool descending = false;
 };
 
 struct ParsedQuery {
@@ -74,6 +91,25 @@ struct ParsedQuery {
     ParsedWhere where;
     bool hasGroupBy = false;
     ColumnRef groupBy;
+    std::vector<OrderKey> orderBy;
+    bool hasLimit = false;
+    uint64_t limit = 0;
+    uint64_t offset = 0;
+};
+
+struct ParsedStatement {
+    enum class Kind {
+        Select,
+        CreateTable,
+        Insert,
+        Delete,
+        Describe,
+    };
+
+    Kind kind = Kind::Select;
+    ParsedQuery query;                          // Select; tableName/where also used by Delete
+    std::vector<ColType> columnTypes;           // CreateTable
+    std::vector<std::vector<Token>> insertRows; // Insert: literal tokens, coerced at execution time
 };
 
 struct AggregateState {
@@ -102,7 +138,9 @@ public:
                 tokens.push_back(readIdentifier());
                 continue;
             }
-            if (std::isdigit(static_cast<unsigned char>(ch))) {
+            if (std::isdigit(static_cast<unsigned char>(ch)) ||
+                ((ch == '-' || ch == '.') && pos_ + 1 < input_.size() &&
+                 std::isdigit(static_cast<unsigned char>(input_[pos_ + 1])))) {
                 tokens.push_back(readNumber());
                 continue;
             }
@@ -132,6 +170,26 @@ public:
                     ++pos_;
                     tokens.push_back({TokenKind::Eq, "="});
                     break;
+                case '<':
+                    ++pos_;
+                    if (pos_ < input_.size() && input_[pos_] == '=') {
+                        ++pos_;
+                        tokens.push_back({TokenKind::Le, "<="});
+                    } else if (pos_ < input_.size() && input_[pos_] == '>') {
+                        throw std::invalid_argument("<> is not supported");
+                    } else {
+                        tokens.push_back({TokenKind::Lt, "<"});
+                    }
+                    break;
+                case '>':
+                    ++pos_;
+                    if (pos_ < input_.size() && input_[pos_] == '=') {
+                        ++pos_;
+                        tokens.push_back({TokenKind::Ge, ">="});
+                    } else {
+                        tokens.push_back({TokenKind::Gt, ">"});
+                    }
+                    break;
                 case ';':
                     ++pos_;
                     tokens.push_back({TokenKind::Semicolon, ";"});
@@ -153,9 +211,27 @@ private:
         return {TokenKind::Identifier, input_.substr(start, pos_ - start)};
     }
 
+    // Accepts an optional leading '-', digits, an optional fraction and exponent.
+    // Callers decide which shapes are valid for the target column type.
     Token readNumber() {
         const size_t start = pos_;
-        while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) ++pos_;
+        if (input_[pos_] == '-') ++pos_;
+        auto digits = [&] {
+            while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) ++pos_;
+        };
+        digits();
+        if (pos_ < input_.size() && input_[pos_] == '.') {
+            ++pos_;
+            digits();
+        }
+        if (pos_ < input_.size() && (input_[pos_] == 'e' || input_[pos_] == 'E')) {
+            size_t p = pos_ + 1;
+            if (p < input_.size() && (input_[p] == '+' || input_[p] == '-')) ++p;
+            if (p < input_.size() && std::isdigit(static_cast<unsigned char>(input_[p]))) {
+                pos_ = p;
+                digits();
+            }
+        }
         return {TokenKind::Number, input_.substr(start, pos_ - start)};
     }
 
@@ -164,7 +240,15 @@ private:
         std::string value;
         while (pos_ < input_.size()) {
             const char ch = input_[pos_++];
-            if (ch == '\'') return {TokenKind::String, value};
+            if (ch == '\'') {
+                // '' inside a literal is an escaped single quote
+                if (pos_ < input_.size() && input_[pos_] == '\'') {
+                    value.push_back('\'');
+                    ++pos_;
+                    continue;
+                }
+                return {TokenKind::String, value};
+            }
             value.push_back(ch);
         }
         throw std::invalid_argument("unterminated string literal");
@@ -183,12 +267,37 @@ class Parser {
 public:
     explicit Parser(const std::vector<Token>& tokens) : tokens_(tokens) {}
 
-    ParsedQuery parse() {
+    ParsedStatement parse() {
+        ParsedStatement stmt;
+        if (matchKeyword("CREATE")) {
+            stmt.kind = ParsedStatement::Kind::CreateTable;
+            parseCreateTable(stmt);
+        } else if (matchKeyword("INSERT")) {
+            stmt.kind = ParsedStatement::Kind::Insert;
+            parseInsert(stmt);
+        } else if (matchKeyword("DELETE")) {
+            stmt.kind = ParsedStatement::Kind::Delete;
+            parseDelete(stmt);
+        } else if (matchKeyword("DESCRIBE")) {
+            stmt.kind = ParsedStatement::Kind::Describe;
+            stmt.query.tableName = expectTablePath();
+        } else {
+            stmt.kind = ParsedStatement::Kind::Select;
+            stmt.query = parseSelect();
+        }
+
+        if (peek().kind == TokenKind::Semicolon) ++pos_;
+        expect(TokenKind::End, "end of query");
+        return stmt;
+    }
+
+private:
+    ParsedQuery parseSelect() {
         ParsedQuery query;
         expectKeyword("SELECT");
         query.selectItems = parseSelectList();
         expectKeyword("FROM");
-        query.tableName = expect(TokenKind::String, "table path string literal").text;
+        query.tableName = expectTablePath();
 
         if (matchKeyword("WHERE")) {
             query.hasWhere = true;
@@ -201,12 +310,118 @@ public:
             query.groupBy = parseColumnRef(expect(TokenKind::Identifier, "group-by column"));
         }
 
-        if (peek().kind == TokenKind::Semicolon) ++pos_;
-        expect(TokenKind::End, "end of query");
+        if (matchKeyword("ORDER")) {
+            expectKeyword("BY");
+            do {
+                query.orderBy.push_back(parseOrderKey());
+            } while (match(TokenKind::Comma));
+        }
+
+        if (matchKeyword("LIMIT")) {
+            query.hasLimit = true;
+            query.limit = parseCount(expect(TokenKind::Number, "LIMIT count"));
+            if (matchKeyword("OFFSET"))
+                query.offset = parseCount(expect(TokenKind::Number, "OFFSET count"));
+        }
         return query;
     }
 
-private:
+    // CREATE TABLE '<path>' (UINT32, STRING, ...)   or   (c0 UINT32, c1 STRING, ...)
+    void parseCreateTable(ParsedStatement& stmt) {
+        expectKeyword("TABLE");
+        stmt.query.tableName = expectTablePath();
+        expect(TokenKind::LParen, "(");
+        do {
+            Token token = expect(TokenKind::Identifier, "column type");
+            if (peek().kind == TokenKind::Identifier) {
+                const ColumnRef ref = parseColumnRef(token);
+                if (ref.index != stmt.columnTypes.size())
+                    throw std::invalid_argument("CREATE TABLE columns must be named c0, c1, ... in order");
+                token = expect(TokenKind::Identifier, "column type");
+            }
+            stmt.columnTypes.push_back(parseColType(token));
+        } while (match(TokenKind::Comma));
+        expect(TokenKind::RParen, ")");
+        if (stmt.columnTypes.size() > 0xFFFFu)
+            throw std::invalid_argument("too many columns");
+    }
+
+    // INSERT INTO '<path>' VALUES (v0, v1, ...) [, (...)]*
+    void parseInsert(ParsedStatement& stmt) {
+        expectKeyword("INTO");
+        stmt.query.tableName = expectTablePath();
+        expectKeyword("VALUES");
+        do {
+            expect(TokenKind::LParen, "(");
+            std::vector<Token> row;
+            do {
+                if (peek().kind != TokenKind::Number && peek().kind != TokenKind::String)
+                    throw std::invalid_argument("expected numeric or string literal in VALUES");
+                row.push_back(tokens_[pos_++]);
+            } while (match(TokenKind::Comma));
+            expect(TokenKind::RParen, ")");
+            stmt.insertRows.push_back(std::move(row));
+        } while (match(TokenKind::Comma));
+    }
+
+    // DELETE FROM '<path>' [WHERE ...]
+    void parseDelete(ParsedStatement& stmt) {
+        expectKeyword("FROM");
+        stmt.query.tableName = expectTablePath();
+        if (matchKeyword("WHERE")) {
+            stmt.query.hasWhere = true;
+            stmt.query.where = parseWhereClause();
+        }
+    }
+
+    std::string expectTablePath() {
+        const std::string path = expect(TokenKind::String, "table path string literal").text;
+        if (path.empty()) throw std::invalid_argument("table path must not be empty");
+        return path;
+    }
+
+    ColType parseColType(const Token& token) {
+        if (equalsIgnoreCase(token.text, "UINT32")) return ColType::UINT32;
+        if (equalsIgnoreCase(token.text, "INT64")) return ColType::INT64;
+        if (equalsIgnoreCase(token.text, "FLOAT")) return ColType::FLOAT;
+        if (equalsIgnoreCase(token.text, "DOUBLE")) return ColType::DOUBLE;
+        if (equalsIgnoreCase(token.text, "STRING")) return ColType::STRING;
+        throw std::invalid_argument("unknown column type: " + token.text);
+    }
+
+    OrderKey parseOrderKey() {
+        OrderKey key;
+        if (peek().kind == TokenKind::Number) {
+            key.position = parseCount(tokens_[pos_++]);
+            if (key.position == 0) throw std::invalid_argument("ORDER BY position must be >= 1");
+        } else {
+            const SelectItem item = parseSelectItem();
+            switch (item.kind) {
+                case SelectItem::Kind::Column: key.header = item.column.text; break;
+                case SelectItem::Kind::CountStar: key.header = "count(*)"; break;
+                case SelectItem::Kind::Sum: key.header = "sum(" + item.column.text + ")"; break;
+                case SelectItem::Kind::Min: key.header = "min(" + item.column.text + ")"; break;
+                case SelectItem::Kind::Max: key.header = "max(" + item.column.text + ")"; break;
+                case SelectItem::Kind::Avg: key.header = "avg(" + item.column.text + ")"; break;
+                case SelectItem::Kind::Star: throw std::invalid_argument("ORDER BY * is not supported");
+            }
+        }
+        if (matchKeyword("DESC")) key.descending = true;
+        else (void)matchKeyword("ASC");
+        return key;
+    }
+
+    uint64_t parseCount(const Token& token) {
+        if (token.text.empty() ||
+            !std::all_of(token.text.begin(), token.text.end(), [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)); }))
+            throw std::invalid_argument("expected non-negative integer, got " + token.text);
+        try {
+            return std::stoull(token.text);
+        } catch (const std::out_of_range&) {
+            throw std::invalid_argument("integer out of range: " + token.text);
+        }
+    }
+
     std::vector<SelectItem> parseSelectList() {
         std::vector<SelectItem> items;
         do {
@@ -250,14 +465,26 @@ private:
 
     ParsedWhere parseWhereClause() {
         ParsedWhere where;
-        where.predicates.push_back(parsePredicate());
+        size_t emptyTerms = 0;
+        auto addTerm = [&] {
+            bool empty = false;
+            Predicate predicate = parsePredicate(empty);
+            if (empty) {
+                where.emptyRangeCols.push_back(predicate.colIdx);
+                ++emptyTerms;
+            } else {
+                where.predicates.push_back(std::move(predicate));
+            }
+        };
+
+        addTerm();
         while (true) {
             if (matchKeyword("AND")) {
                 if (where.hasConnective && where.connective != ParsedWhere::Connective::And)
                     throw std::invalid_argument("mixed AND/OR WHERE clauses are not supported");
                 where.hasConnective = true;
                 where.connective = ParsedWhere::Connective::And;
-                where.predicates.push_back(parsePredicate());
+                addTerm();
                 continue;
             }
             if (matchKeyword("OR")) {
@@ -265,16 +492,52 @@ private:
                     throw std::invalid_argument("mixed AND/OR WHERE clauses are not supported");
                 where.hasConnective = true;
                 where.connective = ParsedWhere::Connective::Or;
-                where.predicates.push_back(parsePredicate());
+                addTerm();
                 continue;
             }
+            // An AND with an unsatisfiable term, or an OR of only unsatisfiable terms, matches nothing.
+            where.alwaysFalse = where.predicates.empty() ||
+                                (where.connective == ParsedWhere::Connective::And && emptyTerms > 0);
             return where;
         }
     }
 
-    Predicate parsePredicate() {
+    // Parses one WHERE term. `<`, `<=`, `>`, `>=` are lowered onto BETWEEN over the
+    // UINT32 domain; `empty` is set when the range can never match (e.g. `c0 < 0`).
+    Predicate parsePredicate(bool& empty) {
         Predicate predicate;
+        empty = false;
         predicate.colIdx = parseColumnRef(expect(TokenKind::Identifier, "predicate column")).index;
+
+        const TokenKind op = peek().kind;
+        if (op == TokenKind::Lt || op == TokenKind::Le || op == TokenKind::Gt || op == TokenKind::Ge) {
+            ++pos_;
+            const ValueType v = parseNumber(expect(TokenKind::Number, "numeric literal"));
+            constexpr ValueType kMax = std::numeric_limits<ValueType>::max();
+            predicate.kind = Predicate::Kind::BETWEEN;
+            switch (op) {
+                case TokenKind::Lt:
+                    empty = (v == 0);
+                    predicate.lo = 0;
+                    predicate.hi = empty ? 0 : v - 1;
+                    break;
+                case TokenKind::Le:
+                    predicate.lo = 0;
+                    predicate.hi = v;
+                    break;
+                case TokenKind::Gt:
+                    empty = (v == kMax);
+                    predicate.lo = empty ? kMax : v + 1;
+                    predicate.hi = kMax;
+                    break;
+                default:
+                    predicate.lo = v;
+                    predicate.hi = kMax;
+                    break;
+            }
+            return predicate;
+        }
+
         if (match(TokenKind::Eq)) {
             if (peek().kind == TokenKind::String) {
                 predicate.kind = Predicate::Kind::EQ_STRING;
@@ -310,7 +573,7 @@ private:
     }
 
     ValueType parseNumber(const Token& token) {
-        const unsigned long long value = std::stoull(token.text);
+        const uint64_t value = parseCount(token);
         if (value > 0xFFFFFFFFull) throw std::invalid_argument("numeric literal out of UINT32 range");
         return static_cast<ValueType>(value);
     }
@@ -378,6 +641,16 @@ void validateColumnRef(const Table& table, uint16_t colIdx) {
         throw std::invalid_argument("column index out of bounds");
 }
 
+void validateWhere(const Table& table, const ParsedWhere& where) {
+    for (const auto& predicate : where.predicates)
+        validateColumnRef(table, predicate.colIdx);
+    for (uint16_t colIdx : where.emptyRangeCols) {
+        validateColumnRef(table, colIdx);
+        if (table.columnFile(colIdx).colType() != ColType::UINT32)
+            throw std::invalid_argument("numeric predicates require UINT32 columns");
+    }
+}
+
 void validateQueryShape(const Table& table, const ParsedQuery& query) {
     bool hasStar = false;
     bool hasColumn = false;
@@ -410,10 +683,7 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
     if (hasStar && query.hasGroupBy)
         throw std::invalid_argument("SELECT * with GROUP BY is not supported");
 
-    if (query.hasWhere) {
-        for (const auto& predicate : query.where.predicates)
-            validateColumnRef(table, predicate.colIdx);
-    }
+    if (query.hasWhere) validateWhere(table, query.where);
 
     if (query.hasGroupBy) {
         validateColumnRef(table, query.groupBy.index);
@@ -456,6 +726,7 @@ std::vector<uint32_t> collectAllLiveRowIDs(Table& table) {
 
 std::vector<uint32_t> executeWhere(Table& table, const ParsedQuery& query) {
     if (!query.hasWhere) return collectAllLiveRowIDs(table);
+    if (query.where.alwaysFalse) return {};
     if (query.where.predicates.size() == 1) return table.scanPredicate(query.where.predicates.front());
     if (query.where.connective == ParsedWhere::Connective::And)
         return table.whereAnd(query.where.predicates);
@@ -621,19 +892,203 @@ MiniSQLResult executeGroupByQuery(Engine& engine, const ParsedQuery& query) {
     }
 }
 
-} // namespace
+const char* colTypeName(ColType type) {
+    switch (type) {
+        case ColType::UINT32: return "UINT32";
+        case ColType::INT64: return "INT64";
+        case ColType::FLOAT: return "FLOAT";
+        case ColType::DOUBLE: return "DOUBLE";
+        case ColType::STRING: return "STRING";
+    }
+    return "UNKNOWN";
+}
 
-MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sql) {
-    const auto tokens = Tokenizer(sql).tokenize();
-    const ParsedQuery query = Parser(tokens).parse();
-    const std::string tablePath = query.tableName + ".mdb";
-    if (access(tablePath.c_str(), F_OK) != 0)
+// Converts a VALUES literal into a ColValue of exactly the column's type, so the
+// storage layer (which reads the union member matching the column type) sees valid data.
+ColValue coerceLiteral(const Token& token, ColType type, size_t colIdx) {
+    const std::string where = " for column c" + std::to_string(colIdx);
+    if (type == ColType::STRING) {
+        if (token.kind != TokenKind::String)
+            throw std::invalid_argument("expected string literal" + where);
+        return ColValue(token.text);
+    }
+    if (token.kind != TokenKind::Number)
+        throw std::invalid_argument("expected numeric literal" + where);
+
+    const std::string& text = token.text;
+    const bool isInteger = text.find_first_of(".eE") == std::string::npos;
+    errno = 0;
+    char* end = nullptr;
+    switch (type) {
+        case ColType::UINT32: {
+            if (!isInteger || text[0] == '-')
+                throw std::invalid_argument("expected non-negative integer" + where);
+            const unsigned long long v = std::strtoull(text.c_str(), &end, 10);
+            if (errno == ERANGE || v > 0xFFFFFFFFull)
+                throw std::invalid_argument("value out of UINT32 range" + where);
+            return ColValue(static_cast<uint32_t>(v));
+        }
+        case ColType::INT64: {
+            if (!isInteger) throw std::invalid_argument("expected integer" + where);
+            const long long v = std::strtoll(text.c_str(), &end, 10);
+            if (errno == ERANGE) throw std::invalid_argument("value out of INT64 range" + where);
+            return ColValue(static_cast<int64_t>(v));
+        }
+        case ColType::FLOAT: {
+            const float v = std::strtof(text.c_str(), &end);
+            if (end != text.c_str() + text.size() || errno == ERANGE)
+                throw std::invalid_argument("invalid FLOAT literal" + where);
+            return ColValue(v);
+        }
+        case ColType::DOUBLE: {
+            const double v = std::strtod(text.c_str(), &end);
+            if (end != text.c_str() + text.size() || errno == ERANGE)
+                throw std::invalid_argument("invalid DOUBLE literal" + where);
+            return ColValue(v);
+        }
+        case ColType::STRING:
+            break;
+    }
+    throw std::invalid_argument("unsupported column type" + where);
+}
+
+bool tableExists(const std::string& tableName) {
+    const std::string tablePath = tableName + ".mdb";
+    return access(tablePath.c_str(), F_OK) == 0;
+}
+
+Table& openExistingTable(Engine& engine, const std::string& tableName) {
+    if (!tableExists(tableName))
         throw std::invalid_argument("table does not exist");
-    Table& table = engine.openTable(query.tableName);
+    return engine.openTable(tableName);
+}
+
+MiniSQLResult rowsAffected(size_t n) {
+    MiniSQLResult result;
+    result.headers.push_back("rows_affected");
+    result.rows.push_back({std::to_string(n)});
+    return result;
+}
+
+MiniSQLResult executeCreateTable(Engine& engine, const ParsedStatement& stmt) {
+    const std::string& name = stmt.query.tableName;
+    if (tableExists(name))
+        throw std::invalid_argument("table already exists");
+    engine.createTypedTable(name, stmt.columnTypes);
+
+    MiniSQLResult result;
+    result.headers.push_back("created");
+    result.rows.push_back({name});
+    return result;
+}
+
+MiniSQLResult executeInsert(Engine& engine, const ParsedStatement& stmt) {
+    Table& table = openExistingTable(engine, stmt.query.tableName);
+
+    // Coerce every row before writing any, so a bad literal leaves the table untouched.
+    std::vector<std::vector<ColValue>> rows;
+    rows.reserve(stmt.insertRows.size());
+    for (const auto& literals : stmt.insertRows) {
+        if (literals.size() != table.numColumns()) {
+            throw std::invalid_argument("expected " + std::to_string(table.numColumns()) +
+                                        " values per row, got " + std::to_string(literals.size()));
+        }
+        std::vector<ColValue> row;
+        row.reserve(literals.size());
+        for (size_t c = 0; c < literals.size(); ++c)
+            row.push_back(coerceLiteral(literals[c], table.columnFile(static_cast<uint16_t>(c)).colType(), c));
+        rows.push_back(std::move(row));
+    }
+
+    for (const auto& row : rows) table.insertTypedRow(row);
+    return rowsAffected(rows.size());
+}
+
+MiniSQLResult executeDelete(Engine& engine, const ParsedStatement& stmt) {
+    Table& table = openExistingTable(engine, stmt.query.tableName);
+    if (stmt.query.hasWhere) validateWhere(table, stmt.query.where);
+    const auto rowIDs = executeWhere(table, stmt.query);
+    for (uint32_t rowID : rowIDs) table.deleteRow(rowID);
+    return rowsAffected(rowIDs.size());
+}
+
+MiniSQLResult executeDescribe(Engine& engine, const ParsedStatement& stmt) {
+    Table& table = openExistingTable(engine, stmt.query.tableName);
+    MiniSQLResult result;
+    result.headers = {"column", "type"};
+    for (uint16_t c = 0; c < table.numColumns(); ++c)
+        result.rows.push_back({"c" + std::to_string(c), colTypeName(table.columnFile(c).colType())});
+    return result;
+}
+
+bool outputColumnIsNumeric(const Table& table, const ParsedQuery& query, size_t idx) {
+    if (query.hasGroupBy) return true;  // UINT32 key + numeric aggregate
+    const auto& first = query.selectItems.front();
+    if (first.kind == SelectItem::Kind::Star)
+        return table.columnFile(static_cast<uint16_t>(idx)).colType() != ColType::STRING;
+    const auto& item = query.selectItems[idx];
+    if (item.kind != SelectItem::Kind::Column) return true;
+    return table.columnFile(item.column.index).colType() != ColType::STRING;
+}
+
+void applyOrderAndLimit(const Table& table, const ParsedQuery& query, MiniSQLResult& result) {
+    if (!query.orderBy.empty()) {
+        struct ResolvedKey {
+            size_t idx;
+            bool numeric;
+            bool descending;
+        };
+        std::vector<ResolvedKey> keys;
+        for (const auto& key : query.orderBy) {
+            size_t idx = 0;
+            if (key.position != 0) {
+                if (key.position > result.headers.size())
+                    throw std::invalid_argument("ORDER BY position out of range");
+                idx = key.position - 1;
+            } else {
+                auto it = std::find(result.headers.begin(), result.headers.end(), key.header);
+                if (it == result.headers.end())
+                    throw std::invalid_argument("ORDER BY " + key.header + " must appear in the SELECT list");
+                idx = static_cast<size_t>(it - result.headers.begin());
+            }
+            keys.push_back({idx, outputColumnIsNumeric(table, query, idx), key.descending});
+        }
+
+        // Empty cells (e.g. MIN over no rows) sort before any value.
+        auto compareCell = [](const std::string& a, const std::string& b, bool numeric) -> int {
+            if (a.empty() || b.empty()) return a.empty() == b.empty() ? 0 : (a.empty() ? -1 : 1);
+            if (numeric) {
+                const long double x = std::strtold(a.c_str(), nullptr);
+                const long double y = std::strtold(b.c_str(), nullptr);
+                return x < y ? -1 : (y < x ? 1 : 0);
+            }
+            return a.compare(b) < 0 ? -1 : (a == b ? 0 : 1);
+        };
+        std::stable_sort(result.rows.begin(), result.rows.end(),
+                         [&](const std::vector<std::string>& lhs, const std::vector<std::string>& rhs) {
+                             for (const auto& key : keys) {
+                                 int cmp = compareCell(lhs[key.idx], rhs[key.idx], key.numeric);
+                                 if (key.descending) cmp = -cmp;
+                                 if (cmp != 0) return cmp < 0;
+                             }
+                             return false;
+                         });
+    }
+
+    if (query.hasLimit || query.offset > 0) {
+        const size_t begin = std::min<uint64_t>(query.offset, result.rows.size());
+        size_t end = result.rows.size();
+        if (query.hasLimit) end = std::min<uint64_t>(begin + query.limit, end);
+        result.rows = std::vector<std::vector<std::string>>(result.rows.begin() + begin,
+                                                            result.rows.begin() + end);
+    }
+}
+
+MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
+    Table& table = openExistingTable(engine, query.tableName);
     validateQueryShape(table, query);
 
-    if (query.hasGroupBy) return executeGroupByQuery(engine, query);
-
+    MiniSQLResult result;
     bool aggregateQuery = false;
     for (const auto& item : query.selectItems) {
         if (item.kind != SelectItem::Kind::Column && item.kind != SelectItem::Kind::Star) {
@@ -641,6 +1096,25 @@ MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sql) {
             break;
         }
     }
-    if (aggregateQuery) return executeScalarAggregateQuery(table, query);
-    return executeProjectionQuery(table, query);
+    if (query.hasGroupBy) result = executeGroupByQuery(engine, query);
+    else if (aggregateQuery) result = executeScalarAggregateQuery(table, query);
+    else result = executeProjectionQuery(table, query);
+
+    applyOrderAndLimit(table, query, result);
+    return result;
+}
+
+} // namespace
+
+MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sql) {
+    const auto tokens = Tokenizer(sql).tokenize();
+    const ParsedStatement stmt = Parser(tokens).parse();
+    switch (stmt.kind) {
+        case ParsedStatement::Kind::CreateTable: return executeCreateTable(engine, stmt);
+        case ParsedStatement::Kind::Insert: return executeInsert(engine, stmt);
+        case ParsedStatement::Kind::Delete: return executeDelete(engine, stmt);
+        case ParsedStatement::Kind::Describe: return executeDescribe(engine, stmt);
+        case ParsedStatement::Kind::Select: break;
+    }
+    return executeSelect(engine, stmt.query);
 }
