@@ -78,7 +78,8 @@ Still missing: joins, arithmetic expressions.
 
 Concurrent sessions, connection limits, graceful shutdown, and a `--data-dir` sandbox are
 in place, and `mdb pgserve` speaks the Postgres v3 simple-query protocol (psql / psycopg2
-work). Still missing: extended query protocol, TLS, SCRAM auth, pg_catalog.
+work), including prepared statements, binary formats, server-side cursors, and catalog
+introspection. Still missing: TLS, SCRAM auth, COPY STDIN/STDOUT.
 
 ---
 

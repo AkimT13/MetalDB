@@ -542,11 +542,35 @@ Coverage: extended-protocol and cursor cases in `test_pgwire` (raw client, byte-
 
 ---
 
+### Postgres Catalog Introspection (complete)
+
+`PgCatalog.cpp` answers catalog queries for `mdb pgserve` from the table files under the
+data directory: psql `\dt` / `\dt+` / `\d` / `\d table` / `\d+ table` / `\l` / `\dn`,
+`information_schema.tables` and `.columns` (with `table_schema` / `table_name` /
+`column_name` filters), `version()`, `current_database()`, `current_schema()`,
+`current_user`, `SHOW <setting>`, and driver `pg_type` lookups.
+
+MetalDB has no system catalog, so queries are recognized by the relations they read,
+and each select-list expression is mapped to a value by what it references
+(`c.relname`, `format_type(...)`, `false AS relhasoids`, `"Owner"`...). That keeps answers
+aligned with whatever column list a given client version asks for; relations MetalDB
+has no equivalent of (indexes, constraints, policies, publications, inheritance...) and
+unknown catalog queries return correctly shaped empty results. Catalog cells can be SQL
+NULL (`pgcat::kNull`). Parameters are inlined for catalog queries arriving through the
+extended protocol.
+
+Coverage: `test_pg_catalog` replays the 20 catalog queries psql 16 sends for `\dt`,
+`\dt+`, `\d people`, `\d+ people`, `\l`, `\dn` (captured with `psql -E`, stored in
+`tests/psql16_catalog_queries.inc`) and checks every answer, plus information_schema,
+probes, nested table paths, and that ordinary SQL is not intercepted.
+`python/test_pg_clients.py` checks information_schema through psycopg 3 bound parameters.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Steps
 
-- Minimal `pg_catalog` views so `psql \d` and BI tools can introspect tables
 - Real multi-statement transactions (the WAL already groups operations by transaction ID)
 
 ### GPU Group By Performance

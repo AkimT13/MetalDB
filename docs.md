@@ -81,6 +81,14 @@ conn.commit()
   server-side (psycopg 3, JDBC, asyncpg-style clients) work
 - server-side cursors: `DECLARE name CURSOR FOR ...`, `FETCH [n | ALL] FROM name`, `MOVE`,
   `CLOSE`; declared cursors can also be fetched as protocol portals (psycopg named cursors)
+- catalog introspection (`PgCatalog.cpp`): psql `\dt`, `\dt+`, `\d`, `\d table`, `\d+ table`,
+  `\l`, `\dn`; `information_schema.tables` / `.columns`; `version()`, `current_database()`,
+  `current_schema()`, `current_user`, `SHOW <setting>`; `pg_type` lookups. Tables are
+  discovered from the `.mdb` files under `--data-dir` (or the working directory), including
+  subdirectories (`sales/orders`). Columns report Postgres types (`bigint`, `real`,
+  `double precision`, `text`) and `NOT NULL`. Other catalog queries return correctly shaped
+  empty results, so tools degrade gracefully instead of failing. Names starting with `pg_`
+  are reserved for the catalog.
 - not supported: `COPY ... STDIN/STDOUT`, TLS, SCRAM / MD5 auth, NULL parameters
 
 Verified against `psql` 16 (including `\bind`), psycopg 3.3 (server-side binding, binary

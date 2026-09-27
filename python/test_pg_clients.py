@@ -78,6 +78,13 @@ def run_psycopg3(port):
         sc.execute("SELECT c0 FROM people WHERE c0 <= %s ORDER BY c0", (20,))
         check([r[0] for r in sc] == list(range(1, 21)), "psycopg3 named cursor")
 
+    # Catalog introspection through bound parameters (extended protocol).
+    cur.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = %s", ("people",))
+    check(cur.fetchall() == [("c0", "bigint"), ("c1", "text"), ("c2", "double precision"), ("c3", "bigint")],
+          "psycopg3 information_schema.columns")
+    cur.execute("SELECT version()")
+    check("MetalDB" in cur.fetchone()[0], "psycopg3 version()")
+
     try:
         cur.execute("SELECT * FROM missing WHERE c0 = %s", (1,))
         check(False, "psycopg3 missing table should raise")
