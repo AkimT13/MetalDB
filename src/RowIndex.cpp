@@ -15,9 +15,34 @@ static constexpr uint32_t RIDX_MAGIC = 0x52494458; // 'RIDX'
 RowIndex::RowIndex(const std::string& pathBase, uint16_t numColumns)
   : idxPath_(pathBase + ".idx"), numColumns_(numColumns), fd_(-1) {}
 
+RowIndex::~RowIndex() {
+    if (fd_ >= 0) close(fd_);
+}
+
+RowIndex::RowIndex(RowIndex&& other) noexcept
+  : idxPath_(std::move(other.idxPath_)), numColumns_(other.numColumns_), fd_(other.fd_),
+    entries_(std::move(other.entries_)), deletedCount_(other.deletedCount_) {
+    other.fd_ = -1;
+}
+
+RowIndex& RowIndex::operator=(RowIndex&& other) noexcept {
+    if (this != &other) {
+        if (fd_ >= 0) close(fd_);
+        idxPath_ = std::move(other.idxPath_);
+        numColumns_ = other.numColumns_;
+        fd_ = other.fd_;
+        entries_ = std::move(other.entries_);
+        deletedCount_ = other.deletedCount_;
+        other.fd_ = -1;
+    }
+    return *this;
+}
+
 void RowIndex::openOrCreate(bool create) {
+    if (fd_ >= 0) close(fd_);
     fd_ = open(idxPath_.c_str(), O_RDWR | O_CREAT, 0666);
-    assert(fd_ >= 0);
+    if (fd_ < 0)
+        throw std::runtime_error("cannot open row index '" + idxPath_ + "': " + std::strerror(errno));
 
     if (create) {
         // Truncate to empty and write a fresh header.

@@ -39,6 +39,29 @@ Python notes:
 
 ---
 
+## Operations Tooling
+
+```bash
+mdb verify  <table>          # integrity check; exit code 2 on corruption
+mdb stats   <table>          # rows, pages, fill factor, heap live/orphaned bytes, file sizes
+mdb backup  <table> <dir>    # checkpoint, durable copy of every file, checksummed MANIFEST
+mdb restore <dir> <table>    # verify MANIFEST sizes + FNV-1a-64 checksums, then restore
+mdb compact <table>          # rebuild with live rows only; renumbers row IDs densely
+```
+
+`verify` checks the master page, every live row's slot references (page and slot bounds,
+in-use flags, duplicate use, cross-column page sharing), page headers (ID, used-slot
+count), that zone maps bound every live UINT32 value (a too-narrow zone map makes range
+scans silently skip rows), STRING heap bounds, and the free-page lists (cycles, foreign
+pages). Leaked slots are reported as warnings. These tools assume no concurrent writer.
+
+Storage limits: a table holds at most 65,535 pages across all columns (16-bit page IDs;
+roughly `65535 × slots_per_page / columns` rows — ~8.9M rows for a 6-column UINT32 table
+at 4 KiB pages; larger page sizes raise it), and each STRING column's heap is capped at
+4 GiB. Hitting either limit raises an error before anything is written.
+
+---
+
 ## CLI Query Surface
 
 The `mdb` CLI now has a one-shot SQL entrypoint:
