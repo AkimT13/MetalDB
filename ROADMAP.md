@@ -69,7 +69,7 @@ v2 adds `CREATE TABLE`, `INSERT`, `DELETE`, `DESCRIBE`, `<`/`<=`/`>`/`>=`, `ORDE
 `LIMIT`/`OFFSET`. v3 adds boolean WHERE trees (AND/OR/NOT, parens, `!=`, IN) on all types, and `UPDATE`.
 Still missing: joins, arithmetic expressions.
 
-### Networking / Server Mode  [NEXT: POSTGRES WIRE]
+### Networking / Server Mode  [DONE: line protocol + Postgres wire (simple query)]
 `mdb serve <port>` now exposes the mini-SQL executor over a simple loopback TCP server:
 - one request per line
 - response framed with `END`
@@ -77,7 +77,8 @@ Still missing: joins, arithmetic expressions.
 - `.quit` closes a client session cleanly
 
 Concurrent sessions, connection limits, graceful shutdown, and a `--data-dir` sandbox are
-in place. Still missing: Postgres wire compatibility, auth/TLS.
+in place, and `mdb pgserve` speaks the Postgres v3 simple-query protocol (psql / psycopg2
+work). Still missing: extended query protocol, TLS, SCRAM auth, pg_catalog.
 
 ---
 

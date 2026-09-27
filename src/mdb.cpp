@@ -29,6 +29,7 @@ static void usage(const char* argv0) {
         "  %s repl\n"
         "  %s serve <port> [--bind ADDR] [--max-connections N] [--idle-timeout SEC]\n"
         "               [--data-dir DIR] [--sync-commit] [--verbose]\n"
+        "  %s pgserve <port> [same options] [--password PW]   PostgreSQL wire protocol\n"
         "  %s flush <table>\n"
         "  %s verify <table>             integrity check (exit 2 on corruption)\n"
         "  %s stats <table>              storage statistics\n"
@@ -36,7 +37,7 @@ static void usage(const char* argv0) {
         "  %s restore <dir> <table>      verify checksums, restore to a new table\n"
         "  %s compact <table>            rebuild with live rows only (renumbers row IDs)\n"
         "  %s sum <file> <col>\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static bool parseU16(const char* s, uint16_t& out) {
@@ -167,9 +168,10 @@ int main(int argc, char** argv) {
         return runRepl();
     }
 
-    if (cmd == "serve") {
+    if (cmd == "serve" || cmd == "pgserve") {
         if (argc < 3) { usage(argv[0]); return 1; }
         ServerOptions opts;
+        if (cmd == "pgserve") opts.protocol = ServerOptions::Protocol::Postgres;
         if (!parseU16(argv[2], opts.port) || opts.port == 0) {
             std::fprintf(stderr, "Bad port\n");
             return 1;
@@ -198,6 +200,8 @@ int main(int argc, char** argv) {
                 opts.syncCommit = true;
             } else if (flag == "--verbose") {
                 opts.verbose = true;
+            } else if (flag == "--password" && cmd == "pgserve") {
+                opts.password = value();
             } else {
                 std::fprintf(stderr, "Unknown serve option: %s\n", flag.c_str());
                 return 1;

@@ -447,20 +447,33 @@ tracker-lifetime race it found in the shutdown path).
 
 ---
 
+### PostgreSQL Wire Protocol (complete, simple-query subset)
+
+`mdb pgserve <port>` (`PgWire.cpp`) speaks PostgreSQL protocol v3: SSL/GSS negotiation
+(declined), startup, optional cleartext `--password` auth, ParameterStatus /
+BackendKeyData, multi-statement simple queries, RowDescription with type OIDs from
+`MiniSQLResult::types`, DataRow (text), proper CommandComplete tags, SQLSTATE-coded
+ErrorResponse, EmptyQueryResponse, NOTICEs, Terminate. Transaction / SET commands are
+no-op shims for driver compatibility; the extended protocol is rejected with `0A000` and
+the session resynchronizes at Sync. Shares the concurrent accept loop, limits, sandbox,
+and graceful shutdown with `mdb serve` (the server was refactored around a protocol-
+agnostic `SessionIO`).
+
+Verified manually with stock `psql` 16 and psycopg2 2.9 (typed values, parameter
+quoting, error codes). Automated coverage: `test_pgwire` (raw v3 client: SSL
+negotiation, typed RowDescription, tags, error-stops-batch, SQLSTATEs, empty query,
+health check, transaction shims, extended-protocol rejection + Sync recovery, password
+auth success / failure, Terminate).
+
+---
+
 ## Known Issues / Next Work
 
-### Next Logical Step — Postgres Wire Compatibility
+### Next Logical Steps
 
-The storage layer now has a basic durability story, and the existing server is no longer
-purely ephemeral. The next logical step is moving the network surface toward real client
-compatibility with a small Postgres wire subset.
-
-Recommended scope:
-
-- authentication-free local prototype first
-- simple query message path only
-- map query results onto the existing mini-SQL executor
-- keep concurrency single-threaded until page-cache / row-index locking exists
+- Extended query protocol (Parse / Bind / Execute) so JDBC and psycopg3's default mode work
+- Minimal `pg_catalog` views so `psql \d` and BI tools can introspect tables
+- Real multi-statement transactions (the WAL already groups operations by transaction ID)
 
 ### GPU Group By Performance
 
