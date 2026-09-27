@@ -39,6 +39,43 @@ Python notes:
 
 ---
 
+## PostgreSQL Wire Protocol
+
+`mdb pgserve <port>` speaks the PostgreSQL v3 protocol (simple-query subset), so stock
+clients work unchanged:
+
+```bash
+./mdb pgserve 5433 --data-dir /srv/metaldb --password s3cret &
+psql -h 127.0.0.1 -p 5433 -U app -c "SELECT c1, count(*) FROM 'events' GROUP BY c1"
+```
+
+```python
+import psycopg2
+conn = psycopg2.connect(host="127.0.0.1", port=5433, user="app", password="s3cret")
+cur = conn.cursor()
+cur.execute("INSERT INTO 'events' VALUES (%s, %s)", (42, "O'Brien"))   # client-side quoting works
+conn.commit()
+```
+
+- accepts every `mdb serve` option, plus `--password PW` (cleartext password auth;
+  without it, connections are trusted — bind to localhost or use `--data-dir`)
+- result columns carry real type OIDs: UINT32 / INT64 → `int8`, FLOAT → `float4`,
+  DOUBLE → `float8`, STRING → `text`; values are sent in text format
+- command tags: `SELECT n`, `INSERT 0 n`, `UPDATE n`, `DELETE n`, `COPY n`, `CREATE TABLE`
+- errors carry SQLSTATEs (`42P01` undefined table, `42703` undefined column,
+  `42601` syntax, `22003` out of range, `42501` sandbox violation, `28P01` bad password)
+- a Query message may hold several `;`-separated statements; an error stops the rest
+- `BEGIN` / `COMMIT` / `ROLLBACK` / `SET` / `RESET` / `DISCARD` are accepted as no-ops for
+  driver compatibility — every statement already autocommits atomically, and `ROLLBACK`
+  sends a NOTICE saying nothing was undone. `SELECT <integer>` answers health checks.
+- not supported: the extended query protocol (server-side prepared statements — drivers
+  that require it, e.g. JDBC by default, get SQLSTATE `0A000`), `COPY ... STDIN/STDOUT`,
+  TLS, SCRAM / MD5 auth, and `pg_catalog` introspection (so `psql`'s `\d` doesn't work)
+
+Verified against `psql` 16 and psycopg2 2.9.
+
+---
+
 ## Operations Tooling
 
 ```bash

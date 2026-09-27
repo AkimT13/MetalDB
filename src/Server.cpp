@@ -91,64 +91,80 @@ struct ConnectionTracker {
 
 // `tracker` is shared-owned: the accept loop may observe active == 0 and tear down
 // while this thread is still returning from the final notify.
-void handleClient(int clientFd, Engine& engine, const ServerOptions& opts,
-                  std::shared_ptr<ConnectionTracker> tracker, unsigned long id) {
+// `tracker` is shared-owned: the accept loop may observe active == 0 and tear down
+// while this thread is still returning from the final notify.
+void runSession(int clientFd, Engine& engine, const ServerOptions& opts,
+                std::shared_ptr<ConnectionTracker> tracker, unsigned long id) {
     if (opts.verbose) std::fprintf(stderr, "[conn %lu] open\n", id);
-    std::string buffered;
-    char chunk[4096];
-    int idleMs = 0;
-
-    while (!g_stop.load()) {
-        pollfd pfd{clientFd, POLLIN, 0};
-        const int ready = ::poll(&pfd, 1, 200);
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (ready == 0) {
-            idleMs += 200;
-            if (opts.idleTimeoutSec > 0 && idleMs >= opts.idleTimeoutSec * 1000) {
-                (void)sendAll(clientFd, "ERR\tidle timeout\nEND\n");
-                break;
-            }
-            continue;
-        }
-        idleMs = 0;
-
-        const ssize_t nread = ::recv(clientFd, chunk, sizeof(chunk), 0);
-        if (nread == 0) break;
-        if (nread < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        buffered.append(chunk, static_cast<size_t>(nread));
-
-        bool quit = false;
-        size_t newlinePos = 0;
-        while (!quit && (newlinePos = buffered.find('\n')) != std::string::npos) {
-            std::string line = buffered.substr(0, newlinePos);
-            buffered.erase(0, newlinePos + 1);
-            if (!sendAll(clientFd, executeRequest(engine, line))) {
-                quit = true;
-                break;
-            }
-            if (trimLine(line) == ".quit") quit = true;
-        }
-        if (quit) break;
-        if (buffered.size() > opts.maxRequestBytes) {
-            (void)sendAll(clientFd, errLine("request exceeds " + std::to_string(opts.maxRequestBytes) + " bytes"));
-            break;
-        }
+    try {
+        SessionIO io(clientFd, opts);
+        if (opts.protocol == ServerOptions::Protocol::Postgres) handlePgSession(io, engine, opts);
+        else handleLineSession(io, engine, opts);
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "[conn %lu] session error: %s\n", id, ex.what());
     }
-
     ::close(clientFd);
     if (opts.verbose) std::fprintf(stderr, "[conn %lu] closed\n", id);
+
     std::lock_guard<std::mutex> g(tracker->mu);
     --tracker->active;
     tracker->cv.notify_all();
 }
 
 }  // namespace
+
+SessionIO::Status SessionIO::readSome(std::string& buf) {
+    int idleMs = 0;
+    char chunk[8192];
+    while (true) {
+        if (g_stop.load()) return Status::Stopping;
+        pollfd pfd{fd_, POLLIN, 0};
+        const int ready = ::poll(&pfd, 1, 200);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            return Status::Error;
+        }
+        if (ready == 0) {
+            idleMs += 200;
+            if (opts_.idleTimeoutSec > 0 && idleMs >= opts_.idleTimeoutSec * 1000) return Status::IdleTimeout;
+            continue;
+        }
+        const ssize_t n = ::recv(fd_, chunk, sizeof(chunk), 0);
+        if (n == 0) return Status::Closed;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return Status::Error;
+        }
+        buf.append(chunk, static_cast<size_t>(n));
+        return Status::Data;
+    }
+}
+
+bool SessionIO::send(const std::string& bytes) { return sendAll(fd_, bytes); }
+
+void handleLineSession(SessionIO& io, Engine& engine, const ServerOptions& opts) {
+    std::string buffered;
+    while (true) {
+        const auto status = io.readSome(buffered);
+        if (status == SessionIO::Status::IdleTimeout) {
+            (void)io.send("ERR\tidle timeout\nEND\n");
+            return;
+        }
+        if (status != SessionIO::Status::Data) return;
+
+        size_t newlinePos = 0;
+        while ((newlinePos = buffered.find('\n')) != std::string::npos) {
+            std::string line = buffered.substr(0, newlinePos);
+            buffered.erase(0, newlinePos + 1);
+            if (!io.send(executeRequest(engine, line))) return;
+            if (trimLine(line) == ".quit") return;
+        }
+        if (buffered.size() > opts.maxRequestBytes) {
+            (void)io.send(errLine("request exceeds " + std::to_string(opts.maxRequestBytes) + " bytes"));
+            return;
+        }
+    }
+}
 
 int runServer(unsigned short port) {
     ServerOptions opts;
@@ -208,7 +224,9 @@ int runServer(const ServerOptions& opts) {
         return 1;
     }
 
-    std::printf("MetalDB server listening on %s:%u (max %zu connections%s%s)\n", opts.bindAddress.c_str(),
+    std::printf("MetalDB %s server listening on %s:%u (max %zu connections%s%s)\n",
+                opts.protocol == ServerOptions::Protocol::Postgres ? "PostgreSQL-protocol" : "line-protocol",
+                opts.bindAddress.c_str(),
                 static_cast<unsigned>(opts.port), opts.maxConnections,
                 opts.dataDir.empty() ? "" : ", data dir ", opts.dataDir.c_str());
     std::fflush(stdout);
@@ -240,7 +258,7 @@ int runServer(const ServerOptions& opts) {
             ++tracker->active;
         }
         try {
-            std::thread(handleClient, clientFd, std::ref(engine), std::cref(opts), tracker, nextID++).detach();
+            std::thread(runSession, clientFd, std::ref(engine), std::cref(opts), tracker, nextID++).detach();
         } catch (const std::system_error& ex) {
             std::fprintf(stderr, "server error: cannot start session thread: %s\n", ex.what());
             (void)sendAll(clientFd, "ERR\tserver overloaded\nEND\n");
