@@ -3,6 +3,7 @@
 #include "MiniSQL.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -655,8 +656,36 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
     } else if (aggregateQuery) {
         result = executeScalarAggregateQuery(table, query);
     } else {
-        result = executeProjectionQuery(table, query);
+        // ORDER BY may name columns that are not projected: carry them as hidden
+        // trailing columns for the sort and drop them afterwards.
+        ParsedQuery withHidden = query;
+        const bool star = query.selectItems.size() == 1 && query.selectItems[0].kind == SelectItem::Kind::Star;
+        if (!star) {
+            for (const auto& key : query.orderBy) {
+                if (key.position != 0 || key.header.size() < 2 || key.header[0] != 'c') continue;
+                const bool projected = std::any_of(query.selectItems.begin(), query.selectItems.end(),
+                                                   [&](const SelectItem& it) { return it.header() == key.header; });
+                const bool numeric = std::all_of(key.header.begin() + 1, key.header.end(),
+                                                 [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)); });
+                if (projected || !numeric) continue;
+                SelectItem hidden;
+                hidden.column = {static_cast<uint16_t>(std::stoul(key.header.substr(1))), key.header};
+                validateColumnRef(table, hidden.column.index);
+                withHidden.selectItems.push_back(hidden);
+            }
+        }
+        const size_t visible = query.selectItems.size();
+        result = executeProjectionQuery(table, withHidden);
         limitApplied = query.orderBy.empty();
+        if (!star && withHidden.selectItems.size() > visible) {
+            if (!query.orderBy.empty()) trace("Sort: " + std::to_string(query.orderBy.size()) + " key(s), " +
+                                              std::to_string(result.rows.size()) + " rows");
+            applyOrderAndLimit(query, result, limitApplied);
+            result.headers.resize(visible);
+            result.types.resize(visible);
+            for (auto& row : result.rows) row.resize(visible);
+            return result;
+        }
     }
 
     if (!query.orderBy.empty()) trace("Sort: " + std::to_string(query.orderBy.size()) + " key(s), " +
@@ -794,8 +823,45 @@ MiniSQLResult executeExplain(Engine& engine, const ParsedStatement& stmt) {
 
 } // namespace
 
-MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText) {
-    const ParsedStatement stmt = sql::parse(sqlText);
+MiniSQLResult describeMiniSQL(Engine& engine, const std::string& sqlText,
+                              const std::vector<std::string>* params) {
+    std::vector<std::string> dummy;
+    if (!params) {
+        dummy.assign(sql::countParams(sqlText), "0");
+        params = &dummy;
+    }
+    const ParsedStatement stmt = sql::parse(sqlText, params);
+    MiniSQLResult shape;
+    if (stmt.explain) {
+        shape.headers = {"plan"};
+        shape.types = {ColType::STRING};
+        return shape;
+    }
+    if (stmt.kind == ParsedStatement::Kind::Describe) {
+        shape.headers = {"column", "type"};
+        shape.types = {ColType::STRING, ColType::STRING};
+        return shape;
+    }
+    if (stmt.kind != ParsedStatement::Kind::Select) return shape;
+
+    (void)engine.resolveTableBase(stmt.query.tableName);
+    std::lock_guard<std::mutex> tableLock(engine.tableMutex(stmt.query.tableName));
+    Table& table = openExistingTable(engine, stmt.query.tableName);
+    validateQueryShape(table, stmt.query);
+    const auto& items = stmt.query.selectItems;
+    if (items.size() == 1 && items[0].kind == SelectItem::Kind::Star) {
+        for (uint16_t c = 0; c < table.numColumns(); ++c) {
+            shape.headers.push_back("c" + std::to_string(c));
+            shape.types.push_back(table.columnFile(c).colType());
+        }
+    } else {
+        setGroupedHeaders(table, stmt.query, shape);
+    }
+    return shape;
+}
+
+MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText, const std::vector<std::string>* params) {
+    const ParsedStatement stmt = sql::parse(sqlText, params);
     // Every statement touches exactly one table; serialize statements per table so
     // concurrent sessions (server threads) never share a Table's mutable caches.
     (void)engine.resolveTableBase(stmt.query.tableName);  // sandbox check before locking

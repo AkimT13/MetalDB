@@ -34,6 +34,16 @@ void assertThrows(const std::string& sql, Engine& engine) {
     assert(threw);
 }
 
+void assertThrowsWith(Engine& engine, const std::string& sql, const std::vector<std::string>* params) {
+    bool threw = false;
+    try {
+        (void)executeMiniSQL(engine, sql, params);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    assert(threw);
+}
+
 } // namespace
 
 int main() {
@@ -274,7 +284,13 @@ int main() {
             r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' LIMIT 10 OFFSET 99");
             assert(r.rows.empty());
         }
-        assertThrows("SELECT c0 FROM '/tmp/sql_dml' ORDER BY c1", e);   // not projected
+        {
+            // ORDER BY a column that is not projected (hidden sort column).
+            auto r = executeMiniSQL(e, "SELECT c3 FROM '/tmp/sql_dml' ORDER BY c2 DESC LIMIT 2");
+            assert((r.headers == std::vector<std::string>{"c3"}) && r.rows[0].size() == 1);
+            assert(r.rows[0][0] == "o'brien" && r.rows[1][0] == "erin");  // c2 = 1e3, then 4.75
+        }
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' ORDER BY c9", e);   // no such column
         assertThrows("SELECT c0 FROM '/tmp/sql_dml' ORDER BY 2", e);    // position out of range
         assertThrows("SELECT c0 FROM '/tmp/sql_dml' LIMIT -1", e);
 
@@ -351,6 +367,41 @@ int main() {
             "printf \".timer on\nSELECT count(*) FROM '/tmp/sql_main';\n.quit\n\" | ./mdb repl 2>&1");
         assert(replOut.find("count(*)\n4\n") != std::string::npos);
         assert(replOut.find("Time: ") != std::string::npos);
+    }
+
+    // Bound parameters ($n), identifier table names, describeMiniSQL
+    {
+        Engine e;
+        const std::vector<std::string> p1 = {"2", "alice"};
+        auto r = executeMiniSQL(e, "SELECT c0, c1 FROM '/tmp/sql_main' WHERE c0 >= $1 AND c2 = $2", &p1);
+        assert((r.rows == std::vector<std::vector<std::string>>{{"2", "30"}}));
+        const std::vector<std::string> p2 = {"1"};
+        r = executeMiniSQL(e, "SELECT c2 FROM '/tmp/sql_main' ORDER BY c0 LIMIT $1", &p2);
+        assert((r.rows == std::vector<std::vector<std::string>>{{"alice"}}));
+        // A numeric-looking parameter compared with a STRING column stays a string.
+        const std::vector<std::string> p3 = {"123"};
+        assert(executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_main' WHERE c2 = $1", &p3).rows.empty());
+        const std::vector<std::string> bad = {"abc"};
+        assertThrowsWith(e, "SELECT c0 FROM '/tmp/sql_main' WHERE c0 = $1", &bad);             // not numeric
+        assertThrowsWith(e, "SELECT c0 FROM '/tmp/sql_main' WHERE c0 = $2", &p2);              // missing $2
+        assertThrows("SELECT c0 FROM '/tmp/sql_main' WHERE c0 = $1", e);                       // unbound
+
+        // Tables named by identifiers resolve like quoted paths (relative to CWD here).
+        std::remove("ident_tbl.mdb"); std::remove("ident_tbl.mdb.idx"); std::remove("ident_tbl.mdb.wal");
+        executeMiniSQL(e, "CREATE TABLE ident_tbl (UINT32)");
+        executeMiniSQL(e, "INSERT INTO public.ident_tbl VALUES (5)");
+        r = executeMiniSQL(e, "SELECT * FROM \"ident_tbl\"");
+        assert(r.rows.size() == 1 && r.rows[0][0] == "5");
+        assertThrows("SELECT * FROM other.ident_tbl", e);
+        std::remove("ident_tbl.mdb"); std::remove("ident_tbl.mdb.idx"); std::remove("ident_tbl.mdb.wal");
+
+        auto d = describeMiniSQL(e, "SELECT c2, count(*), avg(c1) FROM '/tmp/sql_main' WHERE c0 = $1 GROUP BY c2");
+        assert((d.headers == std::vector<std::string>{"c2", "count(*)", "avg(c1)"}));
+        assert((d.types == std::vector<ColType>{ColType::STRING, ColType::INT64, ColType::DOUBLE}) && d.rows.empty());
+        assert(describeMiniSQL(e, "SELECT * FROM '/tmp/sql_main'").headers.size() == 3);
+        assert(describeMiniSQL(e, "INSERT INTO '/tmp/sql_main' VALUES ($1, $2, $3)").headers.empty());
+        assert(describeMiniSQL(e, "EXPLAIN SELECT c0 FROM '/tmp/sql_main'").headers[0] == "plan");
+        assert(executeMiniSQL(e, "SELECT count(*) FROM '/tmp/sql_main'").rows[0][0] == "4");  // describe ran nothing
     }
 
     // ORDER BY over GROUP BY output

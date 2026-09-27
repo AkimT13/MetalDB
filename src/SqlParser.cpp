@@ -75,6 +75,16 @@ public:
                 tokens.push_back(readString());
                 continue;
             }
+            if (ch == '"') {
+                tokens.push_back(readQuotedIdent());
+                continue;
+            }
+            if (ch == '$' && pos_ + 1 < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_ + 1]))) {
+                const size_t start = ++pos_;
+                while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) ++pos_;
+                tokens.push_back({TokenKind::Param, input_.substr(start, pos_ - start)});
+                continue;
+            }
 
             ++pos_;
             const char next = pos_ < input_.size() ? input_[pos_] : '\0';
@@ -84,6 +94,7 @@ public:
                 case '(': tokens.push_back({TokenKind::LParen, "("}); break;
                 case ')': tokens.push_back({TokenKind::RParen, ")"}); break;
                 case ';': tokens.push_back({TokenKind::Semicolon, ";"}); break;
+                case '.': tokens.push_back({TokenKind::Dot, "."}); break;
                 case '=': tokens.push_back({TokenKind::Eq, "="}); break;
                 case '!':
                     if (next != '=') throw std::invalid_argument("unexpected character: !");
@@ -169,6 +180,24 @@ private:
         throw std::invalid_argument("unterminated string literal");
     }
 
+    Token readQuotedIdent() {
+        ++pos_;
+        std::string value;
+        while (pos_ < input_.size()) {
+            const char ch = input_[pos_++];
+            if (ch == '"') {
+                if (pos_ < input_.size() && input_[pos_] == '"') {  // "" escapes a quote
+                    value.push_back('"');
+                    ++pos_;
+                    continue;
+                }
+                return {TokenKind::QuotedIdent, value};
+            }
+            value.push_back(ch);
+        }
+        throw std::invalid_argument("unterminated quoted identifier");
+    }
+
     // Whitespace and `-- line comments`.
     void skipWhitespaceAndComments() {
         while (pos_ < input_.size()) {
@@ -250,9 +279,9 @@ private:
 
         if (matchKeyword("LIMIT")) {
             query.hasLimit = true;
-            query.limit = parseCount(expect(TokenKind::Number, "LIMIT count"));
+            query.limit = parseCount(expectNumeric("LIMIT count"));
             if (matchKeyword("OFFSET"))
-                query.offset = parseCount(expect(TokenKind::Number, "OFFSET count"));
+                query.offset = parseCount(expectNumeric("OFFSET count"));
         }
         return query;
     }
@@ -334,7 +363,9 @@ private:
         } else {
             expectKeyword("TO");
         }
-        stmt.copyFile = expect(TokenKind::String, "file path string literal").text;
+        if (peek().kind != TokenKind::String && peek().kind != TokenKind::Untyped)
+            throw std::invalid_argument("expected file path string literal");
+        stmt.copyFile = tokens_[pos_++].text;
         if (matchKeyword("WITH")) {
             expectKeyword("HEADER");
             stmt.copyHeader = true;
@@ -475,7 +506,7 @@ private:
 
     OrderKey parseOrderKey() {
         OrderKey key;
-        if (peek().kind == TokenKind::Number) {
+        if (peek().kind == TokenKind::Number || peek().kind == TokenKind::Untyped) {
             key.position = parseCount(tokens_[pos_++]);
             if (key.position == 0) throw std::invalid_argument("ORDER BY position must be >= 1");
         } else {
@@ -489,16 +520,37 @@ private:
         return key;
     }
 
+    // Table reference: 'path', "name", name, or public.name.
     std::string expectTablePath() {
-        const std::string path = expect(TokenKind::String, "table path string literal").text;
+        std::string path;
+        if (peek().kind == TokenKind::String || peek().kind == TokenKind::QuotedIdent) {
+            path = tokens_[pos_++].text;
+        } else if (peek().kind == TokenKind::Identifier) {
+            path = tokens_[pos_++].text;
+            if (match(TokenKind::Dot)) {
+                if (!equalsIgnoreCase(path, "public"))
+                    throw std::invalid_argument("schema '" + path + "' does not exist (only public)");
+                if (peek().kind != TokenKind::Identifier && peek().kind != TokenKind::QuotedIdent)
+                    throw std::invalid_argument("expected table name after '.'");
+                path = tokens_[pos_++].text;
+            }
+        } else {
+            expect(TokenKind::String, "table name");
+        }
         if (path.empty()) throw std::invalid_argument("table path must not be empty");
         return path;
     }
 
     Token expectLiteral(const char* where) {
-        if (peek().kind != TokenKind::Number && peek().kind != TokenKind::String)
+        if (peek().kind != TokenKind::Number && peek().kind != TokenKind::String &&
+            peek().kind != TokenKind::Untyped)
             throw std::invalid_argument(std::string("expected numeric or string literal ") + where);
         return tokens_[pos_++];
+    }
+
+    Token expectNumeric(const char* what) {
+        if (peek().kind == TokenKind::Untyped) return tokens_[pos_++];
+        return expect(TokenKind::Number, what);
     }
 
     static ColType parseColType(const Token& token) {
@@ -581,9 +633,27 @@ std::vector<Token> tokenize(const std::string& input) {
     return Tokenizer(input).run();
 }
 
-ParsedStatement parse(const std::string& input) {
-    const auto tokens = tokenize(input);
+ParsedStatement parse(const std::string& input, const std::vector<std::string>* params) {
+    auto tokens = tokenize(input);
+    for (auto& tok : tokens) {
+        if (tok.kind != TokenKind::Param) continue;
+        const unsigned long idx = tok.text.size() > 5 ? 0 : std::stoul(tok.text);
+        if (idx == 0) throw std::invalid_argument("invalid parameter $" + tok.text);
+        if (!params)
+            throw std::invalid_argument("statement has parameters ($" + tok.text +
+                                        "); bind values through a prepared statement");
+        if (idx > params->size())
+            throw std::invalid_argument("no value supplied for parameter $" + tok.text);
+        tok = {TokenKind::Untyped, (*params)[idx - 1]};
+    }
     return Parser(tokens).parse();
+}
+
+size_t countParams(const std::string& input) {
+    size_t n = 0;
+    for (const auto& tok : tokenize(input))
+        if (tok.kind == TokenKind::Param && tok.text.size() <= 5) n = std::max<size_t>(n, std::stoul(tok.text));
+    return n;
 }
 
 }  // namespace sql
