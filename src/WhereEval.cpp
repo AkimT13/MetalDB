@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -89,7 +90,7 @@ const char* opText(WhereExpr::Op op) {
 }
 
 std::string literalText(const Token& t) {
-    if (t.kind != TokenKind::String) return t.text;
+    if (t.kind == TokenKind::Number) return t.text;
     std::string out = "'";
     for (char ch : t.text) {
         if (ch == '\'') out += "''";
@@ -353,12 +354,15 @@ std::vector<uint32_t> allLiveRowIDs(Table& table) {
 ColValue coerceLiteral(const Token& token, ColType type, size_t colIdx) {
     const std::string where = " for column c" + std::to_string(colIdx);
     if (type == ColType::STRING) {
-        if (token.kind != TokenKind::String)
+        if (token.kind != TokenKind::String && token.kind != TokenKind::Untyped)
             throw std::invalid_argument("expected string literal" + where);
         return ColValue(token.text);
     }
-    if (token.kind != TokenKind::Number)
+    if (token.kind != TokenKind::Number && token.kind != TokenKind::Untyped)
         throw std::invalid_argument("expected numeric literal" + where);
+    if (token.text.empty() || !(std::isdigit(static_cast<unsigned char>(token.text[0])) || token.text[0] == '-' ||
+                                token.text[0] == '.'))
+        throw std::invalid_argument("invalid numeric value '" + token.text + "'" + where);
 
     const std::string& text = token.text;
     const bool isInteger = text.find_first_of(".eE") == std::string::npos;
@@ -407,6 +411,10 @@ void validateWhere(const Table& table, const WhereExpr& expr) {
         throw std::invalid_argument("column " + expr.column.text + " out of bounds");
     const bool stringCol = table.columnFile(expr.column.index).colType() == ColType::STRING;
     for (const auto& lit : expr.literals) {
+        if (lit.kind == TokenKind::Untyped) {  // bound parameter: takes the column's type
+            if (!stringCol) (void)parseNumeric(lit);
+            continue;
+        }
         if (stringCol && lit.kind != TokenKind::String)
             throw std::invalid_argument("column " + expr.column.text + " is STRING; compare it with a string literal");
         if (!stringCol && lit.kind != TokenKind::Number)

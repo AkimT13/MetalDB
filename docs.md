@@ -168,11 +168,18 @@ Write / catalog statements:
 - writes go through the table WAL; use `mdb flush <table>` for an explicit durable checkpoint
 - string literals escape a single quote as `''`
 
+Parameters and names:
+- `$1`, `$2`, ... placeholders bind values supplied separately (C++ `executeMiniSQL(engine,
+  sql, &params)`, Postgres prepared statements). A bound value is an untyped literal: it is
+  read as a number or a string according to the column it is compared with or assigned to
+- tables can be written as `'path'`, `name`, `"name"`, or `public.name`
+- `ORDER BY` may use columns that are not selected (plain projections)
+
 Important limits:
-- table references are quoted base paths, not catalog names
+- table references are paths (relative to `--data-dir` in server mode), not catalog objects
 - columns are synthetic identifiers `c0`, `c1`, ...
 - joins, aliases, arithmetic expressions, subqueries, and CTEs are not supported
-- `ORDER BY` keys must appear in the `SELECT` list
+- in aggregate / GROUP BY queries, `ORDER BY` keys must appear in the `SELECT` list
 - no `HAVING` yet
 
 Output is tab-separated with a header row.

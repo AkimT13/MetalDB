@@ -13,8 +13,13 @@ namespace sql {
 
 enum class TokenKind {
     Identifier,
+    QuotedIdent,  // "name" — table names only
     Number,
     String,
+    Param,        // $1, $2, ... (replaced by Untyped when parameters are bound)
+    Untyped,      // bound parameter value: acts as a number or a string depending on
+                  // the column it is compared with / assigned to (Postgres "unknown")
+    Dot,
     Comma,
     Star,
     LParen,

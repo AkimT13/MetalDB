@@ -20,4 +20,12 @@ struct MiniSQLResult {
 // Parses and executes one mini-SQL statement. Throws std::invalid_argument for
 // user errors (syntax, unknown column, type mismatch, missing table) and
 // std::runtime_error for storage failures.
-MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sql);
+// `params` binds $1..$n placeholders (text values, typed by the column they meet).
+MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sql,
+                             const std::vector<std::string>* params = nullptr);
+
+// Result shape (headers + types, no rows) without executing the statement. Row-
+// less statements (INSERT / UPDATE / DELETE / CREATE TABLE / COPY) describe as no
+// columns. Unbound placeholders are treated as unknown values.
+MiniSQLResult describeMiniSQL(Engine& engine, const std::string& sql,
+                              const std::vector<std::string>* params = nullptr);
