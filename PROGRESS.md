@@ -520,11 +520,32 @@ Coverage: `test_sql_query` in `test_c_api.c`; `test_sql_query` and `test_sum64` 
 
 ---
 
+### Postgres Extended Query Protocol + Server-Side Cursors (complete)
+
+- SQL layer: `$n` placeholders bound as untyped literals that take the type of the column
+  they meet (Postgres "unknown" semantics, so drivers can send everything as text);
+  `describeMiniSQL` reports result columns / types without executing; tables may be
+  named `name`, `"name"`, or `public.name`; ORDER BY may use unselected columns.
+- `PgWire.cpp`: Parse / Bind / Describe / Execute / Close / Sync / Flush with named and
+  unnamed statements and portals, binary parameters (int2/4/8, float4/8, bool, text)
+  and binary results (int8, float4, float8, text), row-limited Execute →
+  PortalSuspended, error state that discards messages until Sync, SQLSTATEs for protocol
+  errors (`26000`, `34000`, `08P01`, `42P05`). Simple and extended paths share one
+  `Outcome` model, so tags / notices / errors match.
+- `DECLARE … CURSOR FOR` / `FETCH` / `MOVE` / `CLOSE`, with declared cursors also
+  reachable as protocol portals (how psycopg 3 named cursors stream results).
+- Empty aggregate results (e.g. `MIN` over no rows) are sent as SQL NULL.
+
+Coverage: extended-protocol and cursor cases in `test_pgwire` (raw client, byte-level);
+`python/test_pg_clients.py` runs psycopg 3 and psycopg2 against a live server (in
+`make cpu-run` and CI). Also verified manually with `psql \bind`.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Steps
 
-- Extended query protocol (Parse / Bind / Execute) so JDBC and psycopg3's default mode work
 - Minimal `pg_catalog` views so `psql \d` and BI tools can introspect tables
 - Real multi-statement transactions (the WAL already groups operations by transaction ID)
 

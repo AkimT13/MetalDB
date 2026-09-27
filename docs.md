@@ -74,11 +74,18 @@ conn.commit()
 - `BEGIN` / `COMMIT` / `ROLLBACK` / `SET` / `RESET` / `DISCARD` are accepted as no-ops for
   driver compatibility — every statement already autocommits atomically, and `ROLLBACK`
   sends a NOTICE saying nothing was undone. `SELECT <integer>` answers health checks.
-- not supported: the extended query protocol (server-side prepared statements — drivers
-  that require it, e.g. JDBC by default, get SQLSTATE `0A000`), `COPY ... STDIN/STDOUT`,
-  TLS, SCRAM / MD5 auth, and `pg_catalog` introspection (so `psql`'s `\d` doesn't work)
+- extended query protocol: prepared statements (named / unnamed), `$n` parameters in
+  text or binary (int2/4/8, float4/8, bool, text), text or binary results, Describe
+  (ParameterDescription + RowDescription / NoData), row-limited Execute with
+  PortalSuspended, Close, and error recovery at Sync — so drivers that bind parameters
+  server-side (psycopg 3, JDBC, asyncpg-style clients) work
+- server-side cursors: `DECLARE name CURSOR FOR ...`, `FETCH [n | ALL] FROM name`, `MOVE`,
+  `CLOSE`; declared cursors can also be fetched as protocol portals (psycopg named cursors)
+- not supported: `COPY ... STDIN/STDOUT`, TLS, SCRAM / MD5 auth, NULL parameters
 
-Verified against `psql` 16 and psycopg2 2.9.
+Verified against `psql` 16 (including `\bind`), psycopg 3.3 (server-side binding, binary
+results, prepared statements, named cursors), and psycopg2 2.9 — see
+`python/test_pg_clients.py`, which CI runs.
 
 ---
 
