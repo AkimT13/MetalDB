@@ -30,6 +30,7 @@
 
 #include "Engine.hpp"
 #include "MiniSQL.hpp"
+#include "PgCatalog.hpp"
 #include "SqlParser.hpp"
 #include "Server.hpp"
 
@@ -186,6 +187,10 @@ std::string dataRow(const std::vector<std::string>& cells, const std::vector<Col
             m.i32(-1);
             continue;
         }
+        if (v == pgcat::kNull) {
+            m.i32(-1);
+            continue;
+        }
         if (formatFor(formats, i) == 1) v = binaryCell(v, t);
         m.i32(static_cast<int32_t>(v.size())).bytes(v);
     }
@@ -318,7 +323,34 @@ struct Cursor {
 
 struct SessionState {
     std::map<std::string, Cursor> cursors;
+    std::string user = "metaldb";
 };
+
+// Inlines bound parameters as quoted literals (catalog queries only; the SQL
+// executor binds parameters properly).
+std::string inlineParams(const std::string& sql, const std::vector<std::string>* params) {
+    if (!params || params->empty()) return sql;
+    std::string out;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        if (sql[i] == '$' && i + 1 < sql.size() && std::isdigit(static_cast<unsigned char>(sql[i + 1]))) {
+            size_t j = i + 1;
+            while (j < sql.size() && std::isdigit(static_cast<unsigned char>(sql[j]))) ++j;
+            const size_t idx = std::stoul(sql.substr(i + 1, j - i - 1));
+            if (idx >= 1 && idx <= params->size()) {
+                out += '\'';
+                for (char ch : (*params)[idx - 1]) {
+                    if (ch == '\'') out += '\'';
+                    out += ch;
+                }
+                out += '\'';
+                i = j - 1;
+                continue;
+            }
+        }
+        out += sql[i];
+    }
+    return out;
+}
 
 std::string cursorName(const sql::Token& t) {
     if (t.kind == sql::TokenKind::QuotedIdent) return t.text;
@@ -433,6 +465,17 @@ Outcome runStatement(const std::string& stmt, Engine& engine, const std::vector<
     Outcome out;
     if (runSpecial(stmt, out)) return out;
     if (runCursorCommand(stmt, engine, params, describeOnly, session, out)) return out;
+    try {
+        if (pgcat::answer(inlineParams(stmt, params), engine, session.user, out.result)) {
+            out.returnsRows = true;
+            out.tag = "SELECT";
+            out.tagCountsRows = true;
+            if (describeOnly) out.result.rows.clear();
+            return out;
+        }
+    } catch (const std::exception& ex) {
+        throw PgError("XX000", std::string("catalog query failed: ") + ex.what());
+    }
 
     const auto w = words(stmt, 1);
     const std::string first = w.empty() ? "" : w[0];
@@ -878,6 +921,7 @@ void handlePgSession(SessionIO& io, Engine& engine, const ServerOptions& opts) {
 
     // ── query phase ──────────────────────────────────────────────────────────
     SessionState session;
+    session.user = user;
     ExtendedSession ext(engine, session);
     while (true) {
         if (!fill(io, buf, 5, idle)) break;

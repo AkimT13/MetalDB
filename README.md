@@ -21,7 +21,8 @@ $ psql -h 127.0.0.1 -p 5433 -c "SELECT c1, count(*), avg(c2) FROM 'orders' WHERE
   with per-predicate access paths and timings.
 - **PostgreSQL wire protocol**: `psql`, psycopg 3, psycopg2 and other drivers connect
   unchanged, including prepared statements with binary parameters and results, and
-  server-side cursors. Columns have typed OIDs and errors carry SQLSTATE codes.
+  server-side cursors. Columns have typed OIDs, errors carry SQLSTATE codes, and psql's
+  `\dt` / `\d table` and `information_schema` work.
 - **Durability**: a redo-only write-ahead log with checksummed records. Every statement is
   one WAL transaction, so a crash never leaves a half-applied `INSERT`, `UPDATE`, or
   `DELETE`. Synchronous commit is optional, and explicit checkpoints are available.

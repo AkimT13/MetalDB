@@ -20,7 +20,7 @@ METALLIB_SRCS := $(METAL_SRCS:.metal=.metallib)
 SRCS := MasterPage.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
         gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm gpu_groupby.mm gpu_string_scan.mm \
         Engine.cpp GroupBy.cpp Join.cpp MiniSQL.cpp SqlParser.cpp WhereEval.cpp Csv.cpp TableTools.cpp QuerySession.cpp \
-        Server.cpp PgWire.cpp Wal.cpp mdb_c.cpp
+        Server.cpp PgWire.cpp PgCatalog.cpp Wal.cpp mdb_c.cpp
 
 # Object files (+ auto-generated dependency files)
 OBJS := $(SRCS:.cpp=.o)
@@ -32,7 +32,7 @@ TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages t
          test_engine test_groupby test_join test_types test_string_gpu test_compound_where \
          test_c_api test_mini_sql test_server test_wal test_atomic test_sql_where \
          test_sql_groupby test_copy test_tools test_server_concurrency \
-         test_pgwire test_gpu_groupby
+         test_pgwire test_gpu_groupby test_pg_catalog
 
 all: $(METALLIB_SRCS) $(TESTS) libmdb.a
 
@@ -129,6 +129,9 @@ test_pgwire: $(OBJS) tests/test_pgwire.cpp mdb
 test_gpu_groupby: $(OBJS) tests/test_gpu_groupby.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+test_pg_catalog: $(OBJS) tests/test_pg_catalog.cpp
+	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_pg_catalog.cpp -o $@ $(LDFLAGS)
+
 # ---- C API library + C test ----
 libmdb.a: $(OBJS)
 	ar rcs $@ $^
@@ -171,6 +174,7 @@ run: all
 	./test_server_concurrency
 	./test_pgwire
 	./test_gpu_groupby
+	./test_pg_catalog
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)
@@ -198,11 +202,11 @@ CPU_CXX      ?= c++
 CPU_CC       ?= cc
 CPU_CXXFLAGS := -std=c++17 -O1 -g -Wall -fPIC -I. -MMD -MP
 CPU_CORE     := MasterPage ColumnFile RowIndex Table Engine GroupBy Join MiniSQL SqlParser WhereEval Csv TableTools QuerySession \
-                Server PgWire Wal mdb_c gpu_cpu_stub
+                Server PgWire PgCatalog Wal mdb_c gpu_cpu_stub
 CPU_OBJS     := $(addprefix $(CPU_DIR)/,$(addsuffix .o,$(CPU_CORE)))
 CPU_TESTS    := test_scan_hybrid test_persist_pages test_where_range test_engine test_groupby \
                 test_join test_types test_string_gpu test_compound_where test_mini_sql \
-                test_server test_wal test_atomic test_sql_where test_sql_groupby test_copy test_tools test_server_concurrency test_pgwire test_gpu_groupby test_multipage test_persistence test_reuse test_scan_sum \
+                test_server test_wal test_atomic test_sql_where test_sql_groupby test_copy test_tools test_server_concurrency test_pgwire test_gpu_groupby test_pg_catalog test_multipage test_persistence test_reuse test_scan_sum \
                 test_table test_table_persist test_c_api
 CPU_BINS     := $(addprefix $(CPU_DIR)/,$(CPU_TESTS)) $(CPU_DIR)/mdb $(CPU_DIR)/libmdb.so
 
