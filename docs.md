@@ -83,6 +83,13 @@ Write / catalog statements:
   updated rows get new row IDs (and move to the end of unordered scans)
 - every write statement is atomic: all rows are validated first, then logged as a
   single WAL transaction
+- `COPY '/tmp/demo' FROM '/path/in.csv' [WITH HEADER]` — RFC 4180 CSV import (quoted
+  fields, `""` escapes, embedded newlines, LF or CRLF). The whole file is parsed and
+  validated first and inserted as one WAL transaction, then checkpointed; any bad
+  record rejects the import with its record number and leaves the table unchanged.
+- `COPY '/tmp/demo' TO '/path/out.csv' [WITH HEADER]` and
+  `COPY (SELECT ...) TO '/path/out.csv'` — CSV export, written to a temp file and
+  renamed into place; floats use round-trip precision so export → import is lossless
 - `DESCRIBE '/tmp/demo'` — lists columns and types
 - `EXPLAIN <statement>` — one `plan` column describing each stage: table size and GPU
   availability, every WHERE leaf's access path (GPU vs CPU and why, zone-map range

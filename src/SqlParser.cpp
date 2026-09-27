@@ -207,6 +207,9 @@ public:
         } else if (matchKeyword("UPDATE")) {
             stmt.kind = ParsedStatement::Kind::Update;
             parseUpdate(stmt);
+        } else if (matchKeyword("COPY")) {
+            stmt.kind = ParsedStatement::Kind::Copy;
+            parseCopy(stmt);
         } else if (matchKeyword("DESCRIBE")) {
             stmt.kind = ParsedStatement::Kind::Describe;
             stmt.query.tableName = expectTablePath();
@@ -312,6 +315,30 @@ private:
             stmt.assignments.push_back(std::move(a));
         } while (match(TokenKind::Comma));
         if (matchKeyword("WHERE")) stmt.query.where = parseOr();
+    }
+
+    // COPY '<table>' FROM '<file>' [WITH HEADER]
+    // COPY '<table>' TO '<file>' [WITH HEADER]
+    // COPY (SELECT ...) TO '<file>' [WITH HEADER]
+    void parseCopy(ParsedStatement& stmt) {
+        if (match(TokenKind::LParen)) {
+            stmt.copyQuery = true;
+            stmt.query = parseSelect();
+            expect(TokenKind::RParen, ")");
+        } else {
+            stmt.query.tableName = expectTablePath();
+        }
+        if (matchKeyword("FROM")) {
+            if (stmt.copyQuery) throw std::invalid_argument("COPY (SELECT ...) only supports TO");
+            stmt.copyFrom = true;
+        } else {
+            expectKeyword("TO");
+        }
+        stmt.copyFile = expect(TokenKind::String, "file path string literal").text;
+        if (matchKeyword("WITH")) {
+            expectKeyword("HEADER");
+            stmt.copyHeader = true;
+        }
     }
 
     // ── WHERE grammar ────────────────────────────────────────────────────────

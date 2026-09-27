@@ -109,6 +109,7 @@ struct ParsedStatement {
         Delete,
         Update,
         Describe,
+        Copy,
     };
 
     Kind kind = Kind::Select;
@@ -117,6 +118,12 @@ struct ParsedStatement {
     std::vector<ColType> columnTypes;           // CreateTable
     std::vector<std::vector<Token>> insertRows; // Insert: literal tokens, coerced at execution time
     std::vector<Assignment> assignments;        // Update
+
+    // Copy: COPY '<table>' FROM|TO '<file>'  or  COPY (SELECT ...) TO '<file>'
+    bool copyFrom = false;       // true: import file into table; false: export
+    bool copyQuery = false;      // export the SELECT in `query` instead of the whole table
+    bool copyHeader = false;     // WITH HEADER: first CSV line holds column names
+    std::string copyFile;
 };
 
 bool equalsIgnoreCase(const std::string& lhs, const char* rhs);

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <unordered_map>
 #include <sstream>
 #include <stdexcept>
@@ -15,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "Csv.hpp"
 #include "Engine.hpp"
 #include "SqlParser.hpp"
 #include "Table.hpp"
@@ -52,9 +54,13 @@ std::string fmtMs(double ms) {
 
 // ── value formatting ─────────────────────────────────────────────────────────
 
+// Display precision by default; COPY TO switches to round-trip precision so an
+// export → import cycle is lossless.
+thread_local bool g_roundTripFloats = false;
+
 std::string formatDouble(double v) {
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.15g", v);
+    std::snprintf(buf, sizeof(buf), g_roundTripFloats ? "%.17g" : "%.15g", v);
     return buf;
 }
 
@@ -78,7 +84,7 @@ std::string formatColValue(const ColValue& value) {
         case ColType::UINT32: return std::to_string(value.u32);
         case ColType::INT64: return std::to_string(value.i64);
         case ColType::FLOAT:
-            std::snprintf(buf, sizeof(buf), "%.7g", static_cast<double>(value.f32));
+            std::snprintf(buf, sizeof(buf), g_roundTripFloats ? "%.9g" : "%.7g", static_cast<double>(value.f32));
             return buf;
         case ColType::DOUBLE: return formatDouble(value.f64);
         case ColType::STRING: return value.str;
@@ -656,6 +662,85 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
     return result;
 }
 
+// COPY '<table>' FROM '<file>': parse the whole file first (so a bad record leaves
+// the table untouched), insert as one WAL transaction, then checkpoint so a large
+// import does not leave a large WAL behind.
+MiniSQLResult executeCopyFrom(Engine& engine, const ParsedStatement& stmt) {
+    Table& table = openExistingTable(engine, stmt.query.tableName);
+    std::ifstream in(stmt.copyFile, std::ios::binary);
+    if (!in) throw std::invalid_argument("cannot open '" + stmt.copyFile + "' for reading");
+
+    std::vector<std::vector<ColValue>> rows;
+    std::vector<std::string> fields;
+    std::vector<bool> quoted;
+    size_t line = 0;
+    bool skipHeader = stmt.copyHeader;
+    while (csv::readRecord(in, fields, &quoted)) {
+        ++line;
+        if (skipHeader) {
+            skipHeader = false;
+            continue;
+        }
+        if (fields.size() == 1 && fields[0].empty() && !quoted[0] && table.numColumns() != 1) continue;
+        if (fields.size() != table.numColumns()) {
+            throw std::invalid_argument("CSV record " + std::to_string(line) + ": expected " +
+                                        std::to_string(table.numColumns()) + " fields, got " +
+                                        std::to_string(fields.size()));
+        }
+        std::vector<ColValue> row;
+        row.reserve(fields.size());
+        for (size_t c = 0; c < fields.size(); ++c) {
+            const ColType type = table.columnFile(static_cast<uint16_t>(c)).colType();
+            Token tok{type == ColType::STRING ? TokenKind::String : TokenKind::Number, std::move(fields[c])};
+            try {
+                row.push_back(coerceLiteral(tok, type, c));
+            } catch (const std::invalid_argument& ex) {
+                throw std::invalid_argument("CSV record " + std::to_string(line) + ": " + ex.what());
+            }
+        }
+        rows.push_back(std::move(row));
+    }
+
+    table.applyAtomic({}, rows);
+    table.flushDurable();
+    return rowsAffected(rows.size());
+}
+
+// COPY '<table>' TO '<file>' / COPY (SELECT ...) TO '<file>'. Writes to a temp file
+// and renames it into place, so readers never observe a half-written export.
+MiniSQLResult executeCopyTo(Engine& engine, const ParsedStatement& stmt) {
+    MiniSQLResult data;
+    g_roundTripFloats = true;
+    struct Reset {
+        ~Reset() { g_roundTripFloats = false; }
+    } reset;
+    if (stmt.copyQuery) {
+        data = executeSelect(engine, stmt.query);
+    } else {
+        ParsedQuery all;
+        all.tableName = stmt.query.tableName;
+        SelectItem star;
+        star.kind = SelectItem::Kind::Star;
+        all.selectItems.push_back(star);
+        data = executeSelect(engine, all);
+    }
+
+    const std::string tmp = stmt.copyFile + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) throw std::invalid_argument("cannot open '" + stmt.copyFile + "' for writing");
+        if (stmt.copyHeader) csv::writeRecord(out, data.headers);
+        for (const auto& row : data.rows) csv::writeRecord(out, row);
+        out.flush();
+        if (!out) throw std::runtime_error("write to '" + tmp + "' failed");
+    }
+    if (std::rename(tmp.c_str(), stmt.copyFile.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        throw std::runtime_error("cannot move export into place at '" + stmt.copyFile + "'");
+    }
+    return rowsAffected(data.rows.size());
+}
+
 const char* statementName(ParsedStatement::Kind kind) {
     switch (kind) {
         case ParsedStatement::Kind::Select: return "SELECT";
@@ -664,6 +749,7 @@ const char* statementName(ParsedStatement::Kind kind) {
         case ParsedStatement::Kind::Delete: return "DELETE";
         case ParsedStatement::Kind::Update: return "UPDATE";
         case ParsedStatement::Kind::Describe: return "DESCRIBE";
+        case ParsedStatement::Kind::Copy: return "COPY";
     }
     return "?";
 }
@@ -717,6 +803,8 @@ MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText) {
         case ParsedStatement::Kind::Delete: return executeDelete(engine, stmt);
         case ParsedStatement::Kind::Describe: return executeDescribe(engine, stmt);
         case ParsedStatement::Kind::Update: return executeUpdate(engine, stmt);
+        case ParsedStatement::Kind::Copy:
+            return stmt.copyFrom ? executeCopyFrom(engine, stmt) : executeCopyTo(engine, stmt);
         case ParsedStatement::Kind::Select: break;
     }
     return executeSelect(engine, stmt.query);
