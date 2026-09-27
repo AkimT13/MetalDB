@@ -27,7 +27,8 @@ static void usage(const char* argv0) {
         "  %s select-between <file> <col> <lo> <hi>\n"
         "  %s query <sql>\n"
         "  %s repl\n"
-        "  %s serve <port>\n"
+        "  %s serve <port> [--bind ADDR] [--max-connections N] [--idle-timeout SEC]\n"
+        "               [--data-dir DIR] [--sync-commit] [--verbose]\n"
         "  %s flush <table>\n"
         "  %s verify <table>             integrity check (exit 2 on corruption)\n"
         "  %s stats <table>              storage statistics\n"
@@ -167,13 +168,42 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "serve") {
-        if (argc != 3) { usage(argv[0]); return 1; }
-        uint16_t port = 0;
-        if (!parseU16(argv[2], port) || port == 0) {
+        if (argc < 3) { usage(argv[0]); return 1; }
+        ServerOptions opts;
+        if (!parseU16(argv[2], opts.port) || opts.port == 0) {
             std::fprintf(stderr, "Bad port\n");
             return 1;
         }
-        return runServer(port);
+        for (int i = 3; i < argc; ++i) {
+            const std::string flag = argv[i];
+            auto value = [&]() -> const char* {
+                if (i + 1 >= argc) {
+                    std::fprintf(stderr, "%s requires a value\n", flag.c_str());
+                    std::exit(1);
+                }
+                return argv[++i];
+            };
+            uint32_t n = 0;
+            if (flag == "--bind") {
+                opts.bindAddress = value();
+            } else if (flag == "--max-connections") {
+                if (!parseU32(value(), n) || n == 0) { std::fprintf(stderr, "Bad --max-connections\n"); return 1; }
+                opts.maxConnections = n;
+            } else if (flag == "--idle-timeout") {
+                if (!parseU32(value(), n)) { std::fprintf(stderr, "Bad --idle-timeout\n"); return 1; }
+                opts.idleTimeoutSec = static_cast<int>(n);
+            } else if (flag == "--data-dir") {
+                opts.dataDir = value();
+            } else if (flag == "--sync-commit") {
+                opts.syncCommit = true;
+            } else if (flag == "--verbose") {
+                opts.verbose = true;
+            } else {
+                std::fprintf(stderr, "Unknown serve option: %s\n", flag.c_str());
+                return 1;
+            }
+        }
+        return runServer(opts);
     }
 
     if (cmd == "flush") {

@@ -76,7 +76,8 @@ Still missing: joins, arithmetic expressions.
 - `OK` or `ERR\t...` status
 - `.quit` closes a client session cleanly
 
-Still intentionally missing: Postgres wire compatibility, auth, and concurrency.
+Concurrent sessions, connection limits, graceful shutdown, and a `--data-dir` sandbox are
+in place. Still missing: Postgres wire compatibility, auth/TLS.
 
 ---
 

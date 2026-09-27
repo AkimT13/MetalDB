@@ -141,7 +141,19 @@ REPL notes:
 - REPL execution uses the same mini-SQL executor as `mdb query`
 
 Server notes:
-- the server listens on `127.0.0.1:<port>`
+- `mdb serve <port> [--bind ADDR] [--max-connections N] [--idle-timeout SEC]
+  [--data-dir DIR] [--sync-commit] [--verbose]`
+- clients are served concurrently (one thread per connection) over one shared engine;
+  statements are serialized per table, so different tables proceed in parallel
+- `--max-connections` (default 64): extra clients receive `ERR\ttoo many connections`
+- `--data-dir DIR`: table names and COPY paths resolve inside DIR; absolute paths and
+  `..` are rejected (recommended whenever clients are not fully trusted)
+- `--sync-commit`: fsync the WAL on every commit
+- `--idle-timeout SEC`: idle sessions get `ERR\tidle timeout` and are closed
+- requests longer than 16 MiB are rejected and the session closed
+- SIGINT / SIGTERM: stop accepting, finish in-flight statements, close sessions,
+  checkpoint every open table, exit 0
+- the server listens on `127.0.0.1:<port>` unless `--bind` says otherwise
 - each newline-terminated request is treated as one SQL statement
 - each response ends with `END\n`
 - successful responses begin with `OK\n`

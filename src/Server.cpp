@@ -1,14 +1,23 @@
 #include "Server.hpp"
 
-#include <cstdio>
+#include <atomic>
 #include <cerrno>
+#include <condition_variable>
+#include <csignal>
+#include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <system_error>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -18,6 +27,10 @@
 #include "QuerySession.hpp"
 
 namespace {
+
+std::atomic<bool> g_stop{false};
+
+void onStopSignal(int) { g_stop.store(true); }
 
 std::string trimLine(const std::string& input) {
     size_t start = 0;
@@ -36,7 +49,11 @@ std::string trimLine(const std::string& input) {
 bool sendAll(int fd, const std::string& payload) {
     size_t sent = 0;
     while (sent < payload.size()) {
+#ifdef MSG_NOSIGNAL
+        const ssize_t rc = ::send(fd, payload.data() + sent, payload.size() - sent, MSG_NOSIGNAL);
+#else
         const ssize_t rc = ::send(fd, payload.data() + sent, payload.size() - sent, 0);
+#endif
         if (rc < 0) {
             if (errno == EINTR) continue;
             return false;
@@ -44,6 +61,13 @@ bool sendAll(int fd, const std::string& payload) {
         sent += static_cast<size_t>(rc);
     }
     return true;
+}
+
+// Responses never contain raw newlines inside an ERR line: the message is one line.
+std::string errLine(std::string message) {
+    for (char& ch : message)
+        if (ch == '\n' || ch == '\r') ch = ' ';
+    return "ERR\t" + message + "\nEND\n";
 }
 
 std::string executeRequest(Engine& engine, const std::string& request) {
@@ -55,38 +79,98 @@ std::string executeRequest(Engine& engine, const std::string& request) {
         const std::string body = formatMiniSQLResult(executeMiniSQL(engine, sql));
         return "OK\n" + body + "END\n";
     } catch (const std::exception& ex) {
-        return std::string("ERR\t") + ex.what() + "\nEND\n";
+        return errLine(ex.what());
     }
 }
 
-bool handleClient(int clientFd) {
-    Engine engine;
+struct ConnectionTracker {
+    std::mutex mu;
+    std::condition_variable cv;
+    size_t active = 0;
+};
+
+// `tracker` is shared-owned: the accept loop may observe active == 0 and tear down
+// while this thread is still returning from the final notify.
+void handleClient(int clientFd, Engine& engine, const ServerOptions& opts,
+                  std::shared_ptr<ConnectionTracker> tracker, unsigned long id) {
+    if (opts.verbose) std::fprintf(stderr, "[conn %lu] open\n", id);
     std::string buffered;
     char chunk[4096];
+    int idleMs = 0;
 
-    while (true) {
+    while (!g_stop.load()) {
+        pollfd pfd{clientFd, POLLIN, 0};
+        const int ready = ::poll(&pfd, 1, 200);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (ready == 0) {
+            idleMs += 200;
+            if (opts.idleTimeoutSec > 0 && idleMs >= opts.idleTimeoutSec * 1000) {
+                (void)sendAll(clientFd, "ERR\tidle timeout\nEND\n");
+                break;
+            }
+            continue;
+        }
+        idleMs = 0;
+
         const ssize_t nread = ::recv(clientFd, chunk, sizeof(chunk), 0);
-        if (nread == 0) return true;
+        if (nread == 0) break;
         if (nread < 0) {
             if (errno == EINTR) continue;
-            return false;
+            break;
         }
         buffered.append(chunk, static_cast<size_t>(nread));
 
+        bool quit = false;
         size_t newlinePos = 0;
-        while ((newlinePos = buffered.find('\n')) != std::string::npos) {
+        while (!quit && (newlinePos = buffered.find('\n')) != std::string::npos) {
             std::string line = buffered.substr(0, newlinePos);
             buffered.erase(0, newlinePos + 1);
-            const std::string response = executeRequest(engine, line);
-            if (!sendAll(clientFd, response)) return false;
-            if (trimLine(line) == ".quit") return true;
+            if (!sendAll(clientFd, executeRequest(engine, line))) {
+                quit = true;
+                break;
+            }
+            if (trimLine(line) == ".quit") quit = true;
+        }
+        if (quit) break;
+        if (buffered.size() > opts.maxRequestBytes) {
+            (void)sendAll(clientFd, errLine("request exceeds " + std::to_string(opts.maxRequestBytes) + " bytes"));
+            break;
         }
     }
+
+    ::close(clientFd);
+    if (opts.verbose) std::fprintf(stderr, "[conn %lu] closed\n", id);
+    std::lock_guard<std::mutex> g(tracker->mu);
+    --tracker->active;
+    tracker->cv.notify_all();
 }
 
-} // namespace
+}  // namespace
 
 int runServer(unsigned short port) {
+    ServerOptions opts;
+    opts.port = port;
+    return runServer(opts);
+}
+
+int runServer(const ServerOptions& opts) {
+    // A client that disconnects mid-response must not kill the whole server.
+    std::signal(SIGPIPE, SIG_IGN);
+    g_stop.store(false);
+    struct sigaction sa{};
+    sa.sa_handler = onStopSignal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // no SA_RESTART: let poll() return EINTR promptly
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+
+    Engine engine;
+    if (!opts.dataDir.empty()) engine.setDataDir(opts.dataDir);
+    engine.setSyncCommit(opts.syncCommit);
+
     const int listenFd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listenFd < 0) {
         std::fprintf(stderr, "server error: socket failed: %s\n", std::strerror(errno));
@@ -99,11 +183,18 @@ int runServer(unsigned short port) {
         ::close(listenFd);
         return 1;
     }
+#ifdef SO_NOSIGPIPE
+    (void)::setsockopt(listenFd, SOL_SOCKET, SO_NOSIGPIPE, &reuse, sizeof(reuse));
+#endif
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(opts.port);
+    if (::inet_pton(AF_INET, opts.bindAddress.c_str(), &addr.sin_addr) != 1) {
+        std::fprintf(stderr, "server error: invalid bind address '%s'\n", opts.bindAddress.c_str());
+        ::close(listenFd);
+        return 1;
+    }
 
     if (::bind(listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::fprintf(stderr, "server error: bind failed: %s\n", std::strerror(errno));
@@ -111,24 +202,68 @@ int runServer(unsigned short port) {
         return 1;
     }
 
-    if (::listen(listenFd, 16) != 0) {
+    if (::listen(listenFd, 128) != 0) {
         std::fprintf(stderr, "server error: listen failed: %s\n", std::strerror(errno));
         ::close(listenFd);
         return 1;
     }
 
-    std::printf("MetalDB server listening on 127.0.0.1:%u\n", static_cast<unsigned>(port));
+    std::printf("MetalDB server listening on %s:%u (max %zu connections%s%s)\n", opts.bindAddress.c_str(),
+                static_cast<unsigned>(opts.port), opts.maxConnections,
+                opts.dataDir.empty() ? "" : ", data dir ", opts.dataDir.c_str());
     std::fflush(stdout);
 
-    while (true) {
+    auto tracker = std::make_shared<ConnectionTracker>();
+    unsigned long nextID = 1;
+    while (!g_stop.load()) {
+        pollfd pfd{listenFd, POLLIN, 0};
+        const int ready = ::poll(&pfd, 1, 200);
+        if (ready <= 0) continue;  // timeout or EINTR: re-check g_stop
+
         const int clientFd = ::accept(listenFd, nullptr, nullptr);
         if (clientFd < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR || errno == ECONNABORTED || errno == EAGAIN) continue;
             std::fprintf(stderr, "server error: accept failed: %s\n", std::strerror(errno));
-            ::close(listenFd);
-            return 1;
+            continue;  // e.g. EMFILE: keep serving existing clients
         }
-        (void)handleClient(clientFd);
-        ::close(clientFd);
+#ifdef SO_NOSIGPIPE
+        (void)::setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &reuse, sizeof(reuse));
+#endif
+
+        {
+            std::lock_guard<std::mutex> g(tracker->mu);
+            if (tracker->active >= opts.maxConnections) {
+                (void)sendAll(clientFd, "ERR\ttoo many connections\nEND\n");
+                ::close(clientFd);
+                continue;
+            }
+            ++tracker->active;
+        }
+        try {
+            std::thread(handleClient, clientFd, std::ref(engine), std::cref(opts), tracker, nextID++).detach();
+        } catch (const std::system_error& ex) {
+            std::fprintf(stderr, "server error: cannot start session thread: %s\n", ex.what());
+            (void)sendAll(clientFd, "ERR\tserver overloaded\nEND\n");
+            ::close(clientFd);
+            std::lock_guard<std::mutex> g(tracker->mu);
+            --tracker->active;
+        }
     }
+
+    // Graceful shutdown: sessions notice g_stop within one poll interval, finish
+    // their in-flight statement, and close.
+    ::close(listenFd);
+    {
+        std::unique_lock<std::mutex> lk(tracker->mu);
+        tracker->cv.wait_for(lk, std::chrono::seconds(30), [&] { return tracker->active == 0; });
+    }
+    try {
+        engine.flushAll();
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "server error: checkpoint during shutdown failed: %s\n", ex.what());
+        return 1;
+    }
+    std::printf("MetalDB server stopped cleanly\n");
+    std::fflush(stdout);
+    return 0;
 }

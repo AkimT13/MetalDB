@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,6 +21,26 @@ public:
     // Applies to every table this engine opens or creates from now on (and to
     // tables already open). See Table::setSyncCommit.
     void setSyncCommit(bool on);
+
+    // ── Concurrency ──────────────────────────────────────────────────────────
+    // The table registry is internally synchronized. Table objects themselves are
+    // not thread-safe (reads populate page caches), so concurrent callers must
+    // hold tableMutex(name) around every operation on that table. executeMiniSQL
+    // does this for each statement.
+    std::mutex& tableMutex(const std::string& name);
+
+    // ── Sandboxing ───────────────────────────────────────────────────────────
+    // With a data directory set, table names and COPY file paths are resolved
+    // relative to it; absolute paths and ".." components are rejected. Without
+    // one (the default), names are used as filesystem paths as-is.
+    void setDataDir(const std::string& dir);
+    const std::string& dataDir() const { return dataDir_; }
+    std::string resolveTableBase(const std::string& name) const;  // "<base>" (no .mdb)
+    std::string resolveFile(const std::string& path) const;
+    bool tableExists(const std::string& name) const;
+
+    // Checkpoints every open table (WAL folded into base files, fsync).
+    void flushAll();
 
     uint32_t insert(const std::string& name, const std::vector<ValueType>& row);
     uint32_t insertTyped(const std::string& name, const std::vector<ColValue>& row);
@@ -46,6 +67,9 @@ public:
 
 private:
     std::unordered_map<std::string, std::shared_ptr<Table>> tables_;
+    std::unordered_map<std::string, std::unique_ptr<std::mutex>> tableLocks_;
+    std::mutex registryMutex_;
     bool syncCommit_ = false;
+    std::string dataDir_;
     std::string tablePath(const std::string& name) const;
 };
