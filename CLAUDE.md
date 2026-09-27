@@ -113,7 +113,9 @@ When uploading strings to GPU, pack them into two MTLBuffers:
    start at 50000 rows). CPU fallback must always exist.
 
 ### Known Constraints
-- Metal does not support atomic_ulong on device memory (use atomic_uint, watch overflow)
+- Metal does not support atomic_ulong on device memory: 64-bit sums use (lo, hi) atomic_uint
+  pairs with carry detection (see add64 in gpu_groupby.metal)
+- 0xFFFFFFFF is the group-by kernel's empty-slot sentinel; the host aggregates that key on the CPU
 - GPU kernels currently only support UINT32; other ColTypes fall back to CPU
 - STRING heap has no compaction; deleted bytes are orphaned
 - materializeColumnWithRowIDs is the current hot path bottleneck (~18ms/call)

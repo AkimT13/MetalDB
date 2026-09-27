@@ -75,14 +75,21 @@ namespace {
 } // namespace
 
 // ── gpuSumU32 ─────────────────────────────────────────────────────────────────
-uint64_t gpuSumU32(const std::vector<uint32_t>& values) {
-    if (values.empty() || !metalIsAvailable()) return 0;
+// Returns false (and leaves `result` untouched) if the GPU path is unavailable or
+// a command buffer fails, so callers can fall back to the CPU instead of mistaking
+// a failure for a sum of 0.
+bool gpuSumU32Checked(const std::vector<uint32_t>& values, uint64_t& result) {
+    if (values.empty()) { result = 0; return true; }
+    if (!metalIsAvailable() || values.size() > 0xFFFFFFFFull) return false;
 
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
-    if (!ensurePipeline()) { pool->release(); return 0; }
+    if (!ensurePipeline()) { pool->release(); return false; }
 
     const uint32_t n     = static_cast<uint32_t>(values.size());
-    const uint32_t tg    = std::min<uint32_t>(s_pso1->maxTotalThreadsPerThreadgroup(), 256);
+    // The tree reduction in sum_partials halves the stride each step, so the
+    // threadgroup size must be a power of two.
+    uint32_t tg = std::min<uint32_t>(s_pso1->maxTotalThreadsPerThreadgroup(), 256);
+    while (tg & (tg - 1)) tg &= tg - 1;
     const uint32_t groups = (n + tg - 1) / tg;
 
     MTL::Buffer* in       = s_dev->newBuffer(n * sizeof(uint32_t), MTL::ResourceStorageModeShared);
@@ -90,8 +97,9 @@ uint64_t gpuSumU32(const std::vector<uint32_t>& values) {
     MTL::Buffer* out      = s_dev->newBuffer(sizeof(uint64_t), MTL::ResourceStorageModeShared);
     if (!in || !partials || !out) {
         if (in) in->release(); if (partials) partials->release(); if (out) out->release();
-        pool->release(); return 0;
+        pool->release(); return false;
     }
+    bool ok = true;
 
     std::memcpy(in->contents(), values.data(), n * sizeof(uint32_t));
     std::memset(out->contents(), 0, sizeof(uint64_t));
@@ -109,6 +117,7 @@ uint64_t gpuSumU32(const std::vector<uint32_t>& values) {
         enc->endEncoding();
         cb->commit();
         cb->waitUntilCompleted();
+        ok = ok && cb->status() == MTL::CommandBufferStatusCompleted;
     }
 
     // Pass 2 — reduce partials to final sum (skip if only one group)
@@ -123,13 +132,20 @@ uint64_t gpuSumU32(const std::vector<uint32_t>& values) {
         enc->endEncoding();
         cb->commit();
         cb->waitUntilCompleted();
+        ok = ok && cb->status() == MTL::CommandBufferStatusCompleted;
     } else {
         *static_cast<uint64_t*>(out->contents()) =
             *static_cast<const uint64_t*>(partials->contents());
     }
 
-    uint64_t sum = *static_cast<const uint64_t*>(out->contents());
+    if (ok) result = *static_cast<const uint64_t*>(out->contents());
     out->release(); partials->release(); in->release();
     pool->release();
-    return sum;
+    return ok;
+}
+
+// Legacy entry point (returns 0 on failure); kept for existing callers / tests.
+uint64_t gpuSumU32(const std::vector<uint32_t>& values) {
+    uint64_t s = 0;
+    return gpuSumU32Checked(values, s) ? s : 0;
 }

@@ -86,6 +86,13 @@ private:
     ColumnPage loadPage(uint16_t pageID) const;
     void flushPage(const ColumnPage &page);
 
+    // Incremental write path: mutate the cached page in place and persist only
+    // what changed (16-byte header + one slot's value bytes + its tombstone byte)
+    // instead of rewriting and re-scanning the whole page per row.
+    ColumnPage& cachedPage(uint16_t pageID);
+    void writeHeader(const ColumnPage& page);
+    void writeSlot(const ColumnPage& page, uint16_t slot);
+
 
     // Helpers to get/set the head of our free-page list
     uint16_t headPageID() const { return mp_.headPageIDs[colIdx_]; }

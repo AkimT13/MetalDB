@@ -355,8 +355,8 @@ int main(int argc, char** argv) {
         if (col >= t.numColumns()) {
             std::fprintf(stderr, "col out of range\n"); return 1;
         }
-        ValueType s = t.sumColumnHybrid(col);
-        std::printf("%u\n", static_cast<uint32_t>(s));
+        const uint64_t s = t.sumColumn64(col);
+        std::printf("%llu\n", static_cast<unsigned long long>(s));
         return 0;
     }
 
