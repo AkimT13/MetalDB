@@ -48,17 +48,35 @@ The `mdb` CLI now has a one-shot SQL entrypoint:
 - `./mdb serve <port>`
 - `./mdb flush <table>`
 
-Supported v1 query shape:
+Supported query shape:
 - `SELECT c0, c1 FROM '/tmp/demo'`
 - optional flat `WHERE` with all `AND` or all `OR`
+  - numeric `=`, `<`, `<=`, `>`, `>=`, `BETWEEN lo AND hi` (UINT32 columns)
+  - string `=` (STRING columns)
 - optional scalar aggregates `COUNT(*)`, `SUM(cN)`, `MIN(cN)`, `MAX(cN)`, `AVG(cN)`
 - optional `GROUP BY cN` with exactly one aggregate expression
+- optional `ORDER BY key [ASC|DESC] [, ...]` where `key` is a selected column, a selected
+  aggregate (`count(*)`, `sum(c1)`, ...) or a 1-based output position
+- optional `LIMIT n [OFFSET m]`
 
-Important v1 limits:
+Write / catalog statements:
+- `CREATE TABLE '/tmp/demo' (UINT32, STRING)` or `(c0 UINT32, c1 STRING)`;
+  types are `UINT32`, `INT64`, `FLOAT`, `DOUBLE`, `STRING`
+- `INSERT INTO '/tmp/demo' VALUES (1, 'a'), (2, 'b')` — literals are coerced to each
+  column's type and the whole statement is validated before any row is written
+- `DELETE FROM '/tmp/demo' [WHERE ...]` — same `WHERE` grammar as `SELECT`
+- `DESCRIBE '/tmp/demo'` — lists columns and types
+- `INSERT` / `DELETE` return a single `rows_affected` column; `CREATE TABLE` returns `created`
+- writes go through the table WAL; use `mdb flush <table>` for an explicit durable checkpoint
+- string literals escape a single quote as `''`
+
+Important limits:
 - table references are quoted base paths, not catalog names
 - columns are synthetic identifiers `c0`, `c1`, ...
-- mixed `AND` / `OR`, joins, aliases, `ORDER BY`, `LIMIT`, parentheses, subqueries, and CTEs are not supported
+- mixed `AND` / `OR`, `!=` / `<>`, joins, aliases, parentheses, subqueries, and CTEs are not supported
+- `ORDER BY` keys must appear in the `SELECT` list
 - `GROUP BY ... WHERE ...` is not supported yet
+- no `UPDATE` yet (see ROADMAP)
 
 Output is tab-separated with a header row.
 

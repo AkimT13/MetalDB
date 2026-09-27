@@ -68,6 +68,8 @@ static void printReplHelp() {
     std::puts(".help           show this help");
     std::puts(".quit           exit the REPL");
     std::puts("Queries must end with ';' and use the same syntax as `mdb query`.");
+    std::puts("Statements: SELECT ... [WHERE] [GROUP BY] [ORDER BY] [LIMIT], CREATE TABLE,");
+    std::puts("            INSERT INTO ... VALUES, DELETE FROM ... [WHERE], DESCRIBE");
 }
 
 static bool findStatementTerminator(const std::string& input, size_t& pos) {

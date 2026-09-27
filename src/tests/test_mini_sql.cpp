@@ -162,6 +162,136 @@ int main() {
         assert(row[0] && row[0]->u32 == 77);
     }
 
+    // ── DDL / DML ────────────────────────────────────────────────────────────
+    std::remove("/tmp/sql_dml.mdb");
+    std::remove("/tmp/sql_dml.mdb.idx");
+    std::remove("/tmp/sql_dml.mdb.wal");
+    std::remove("/tmp/sql_dml.mdb.3.str");
+    {
+        Engine e;
+        {
+            auto r = executeMiniSQL(e, "CREATE TABLE '/tmp/sql_dml' (c0 UINT32, c1 INT64, c2 DOUBLE, c3 STRING)");
+            assert((r.headers == std::vector<std::string>{"created"}));
+            assert(r.rows[0][0] == "/tmp/sql_dml");
+        }
+        assertThrows("CREATE TABLE '/tmp/sql_dml' (UINT32)", e);          // already exists
+        assertThrows("CREATE TABLE '/tmp/sql_bad' (c1 UINT32)", e);       // out-of-order name
+        assertThrows("CREATE TABLE '/tmp/sql_bad' (VARCHAR)", e);         // unknown type
+
+        {
+            auto r = executeMiniSQL(e, "DESCRIBE '/tmp/sql_dml'");
+            assert((r.headers == std::vector<std::string>{"column", "type"}));
+            assert(r.rows.size() == 4);
+            assert((r.rows[1] == std::vector<std::string>{"c1", "INT64"}));
+            assert((r.rows[3] == std::vector<std::string>{"c3", "STRING"}));
+        }
+
+        {
+            auto r = executeMiniSQL(e,
+                "INSERT INTO '/tmp/sql_dml' VALUES "
+                "(1, -5, 2.5, 'alice'), (2, 7, -0.25, 'bob'), (3, 9000000000, 1e3, 'o''brien'), "
+                "(4, 0, 0, 'dave'), (5, 3, 4.75, 'erin')");
+            assert((r.headers == std::vector<std::string>{"rows_affected"}));
+            assert(r.rows[0][0] == "5");
+        }
+        // Type/arity errors are rejected before any row is written.
+        assertThrows("INSERT INTO '/tmp/sql_dml' VALUES (6, 1, 1.0, 'x'), (-1, 1, 1.0, 'y')", e);
+        assertThrows("INSERT INTO '/tmp/sql_dml' VALUES (6, 1.5, 1.0, 'x')", e);
+        assertThrows("INSERT INTO '/tmp/sql_dml' VALUES (6, 1, 'nope', 'x')", e);
+        assertThrows("INSERT INTO '/tmp/sql_dml' VALUES (6, 1, 1.0)", e);
+        assertThrows("INSERT INTO '/tmp/sql_dml' VALUES (4294967296, 1, 1.0, 'x')", e);
+        assertThrows("INSERT INTO '/tmp/sql_missing' VALUES (1)", e);
+        assertThrows("INSERT INTO '/tmp/sql_dml' VALUES (6, 1, 1e999, 'x')", e);
+        {
+            auto r = executeMiniSQL(e, "SELECT count(*) FROM '/tmp/sql_dml'");
+            assert(r.rows[0][0] == "5");
+        }
+        {
+            auto r = executeMiniSQL(e, "SELECT c1, c2, c3 FROM '/tmp/sql_dml' WHERE c0 = 3");
+            assert((r.rows[0] == std::vector<std::string>{"9000000000", "1000", "o'brien"}));
+        }
+
+        // Comparison operators
+        {
+            auto r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 > 3");
+            assert(r.rows.size() == 2 && r.rows[0][0] == "4" && r.rows[1][0] == "5");
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 >= 2 AND c0 < 4");
+            assert(r.rows.size() == 2 && r.rows[0][0] == "2" && r.rows[1][0] == "3");
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 <= 1 OR c0 > 4");
+            assert(r.rows.size() == 2 && r.rows[0][0] == "1" && r.rows[1][0] == "5");
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 < 0");
+            assert(r.rows.empty());
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 < 0 OR c0 = 2");
+            assert(r.rows.size() == 1 && r.rows[0][0] == "2");
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' WHERE c0 > 4294967295");
+            assert(r.rows.empty());
+        }
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c3 < 5", e);   // non-UINT32 column
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c9 < 0", e);   // bad column even if empty range
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c0 = 1.5", e); // non-integer literal
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' WHERE c0 <> 1", e);
+
+        // ORDER BY / LIMIT / OFFSET
+        {
+            auto r = executeMiniSQL(e, "SELECT c0, c2 FROM '/tmp/sql_dml' ORDER BY c2 DESC");
+            assert(r.rows.size() == 5);
+            assert(r.rows[0][0] == "3" && r.rows[1][0] == "5" && r.rows[4][0] == "2");
+            r = executeMiniSQL(e, "SELECT c3 FROM '/tmp/sql_dml' ORDER BY c3 LIMIT 2");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"alice"}, {"bob"}}));
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' ORDER BY 1 DESC LIMIT 2 OFFSET 1");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"4"}, {"3"}}));
+            r = executeMiniSQL(e, "SELECT * FROM '/tmp/sql_dml' LIMIT 0");
+            assert(r.rows.empty() && r.headers.size() == 4);
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml' LIMIT 10 OFFSET 99");
+            assert(r.rows.empty());
+        }
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' ORDER BY c1", e);   // not projected
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' ORDER BY 2", e);    // position out of range
+        assertThrows("SELECT c0 FROM '/tmp/sql_dml' LIMIT -1", e);
+
+        // DELETE
+        {
+            auto r = executeMiniSQL(e, "DELETE FROM '/tmp/sql_dml' WHERE c3 = 'bob' OR c0 >= 5");
+            assert((r.headers == std::vector<std::string>{"rows_affected"}));
+            assert(r.rows[0][0] == "2");
+            r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_dml'");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"1"}, {"3"}, {"4"}}));
+            r = executeMiniSQL(e, "DELETE FROM '/tmp/sql_dml' WHERE c0 < 0");
+            assert(r.rows[0][0] == "0");
+        }
+    }
+
+    // ORDER BY over GROUP BY output
+    {
+        Engine e;
+        auto r = executeMiniSQL(e, "SELECT c0, count(*) FROM '/tmp/sql_main' GROUP BY c0 ORDER BY count(*) DESC, c0 LIMIT 2");
+        assert((r.rows == std::vector<std::vector<std::string>>{{"2", "2"}, {"1", "1"}}));
+    }
+
+    // DML through the CLI across separate processes (exercises WAL replay on reopen)
+    {
+        std::remove("/tmp/sql_cli_dml.mdb");
+        std::remove("/tmp/sql_cli_dml.mdb.idx");
+        std::remove("/tmp/sql_cli_dml.mdb.wal");
+        std::remove("/tmp/sql_cli_dml.mdb.1.str");
+        assert(captureCommand("./mdb query \"CREATE TABLE '/tmp/sql_cli_dml' (UINT32, STRING)\"") ==
+               "created\n/tmp/sql_cli_dml\n");
+        assert(captureCommand("./mdb query \"INSERT INTO '/tmp/sql_cli_dml' VALUES (2, 'b'), (1, 'a'), (3, 'c')\"") ==
+               "rows_affected\n3\n");
+        assert(captureCommand("./mdb query \"DELETE FROM '/tmp/sql_cli_dml' WHERE c0 = 3\"") ==
+               "rows_affected\n1\n");
+        assert(captureCommand("./mdb query \"SELECT * FROM '/tmp/sql_cli_dml' ORDER BY c0\"") ==
+               "c0\tc1\n1\ta\n2\tb\n");
+    }
+
+    std::remove("/tmp/sql_dml.mdb");
+    std::remove("/tmp/sql_dml.mdb.idx");
+    std::remove("/tmp/sql_dml.mdb.wal");
+    std::remove("/tmp/sql_dml.mdb.3.str");
+    std::remove("/tmp/sql_cli_dml.mdb");
+    std::remove("/tmp/sql_cli_dml.mdb.idx");
+    std::remove("/tmp/sql_cli_dml.mdb.wal");
+    std::remove("/tmp/sql_cli_dml.mdb.1.str");
     std::remove("/tmp/sql_main.mdb");
     std::remove("/tmp/sql_main.mdb.idx");
     std::remove("/tmp/sql_main.mdb.wal");
