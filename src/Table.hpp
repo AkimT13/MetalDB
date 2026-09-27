@@ -25,6 +25,18 @@ public:
     Table(const std::string &path, uint16_t pageSize,                        // typed columns
           const std::vector<ColType>& colTypes);
     Table(const std::string &path);  // open existing
+    ~Table();
+    Table(const Table&) = delete;             // owns file descriptors
+    Table& operator=(const Table&) = delete;
+
+    const std::string& path() const { return path_; }
+    uint16_t pageSize() const { return mp_.pageSize; }
+    std::vector<ColType> columnTypes() const {
+        std::vector<ColType> types;
+        for (const auto& c : cols_) types.push_back(c.colType());
+        return types;
+    }
+    size_t rowsRecorded() const { return rowIndex_.rowsRecorded(); }
     std::vector<uint32_t> whereBetween(uint16_t colIdx, ValueType lo, ValueType hi);
     std::vector<uint32_t> scanPredicate(const Predicate& predicate);
     std::vector<uint32_t> whereAnd(const std::vector<Predicate>& predicates);
@@ -57,6 +69,13 @@ public:
 
     // Throws std::invalid_argument unless `values` matches the schema exactly.
     void validateRow(const std::vector<ColValue>& values) const;
+
+    // Throws std::runtime_error if `inserts` (after `freedPerColumn` slots are
+    // released by accompanying deletes) cannot fit: page-ID space or 4 GiB
+    // string heaps. Called before anything is logged — the WAL is redo-only, so a
+    // committed operation that later fails to apply would make the table
+    // unopenable.
+    void ensureCapacity(const std::vector<std::vector<ColValue>>& inserts, size_t freedPerColumn = 0) const;
 
     // When on, every commit fsyncs the WAL before returning (durable against OS
     // crash / power loss, at the cost of one fsync per statement). Default off:

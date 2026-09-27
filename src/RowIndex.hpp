@@ -10,6 +10,13 @@ class RowIndex {
 public:
     // pathBase is the table file path; the index lives at pathBase + ".idx"
     RowIndex(const std::string& pathBase, uint16_t numColumns);
+    ~RowIndex();
+
+    // Owns a file descriptor: movable, not copyable.
+    RowIndex(RowIndex&& other) noexcept;
+    RowIndex& operator=(RowIndex&& other) noexcept;
+    RowIndex(const RowIndex&) = delete;
+    RowIndex& operator=(const RowIndex&) = delete;
 
     // Open existing (.idx) or create new.
     // If create=true the file is always truncated and re-initialised.

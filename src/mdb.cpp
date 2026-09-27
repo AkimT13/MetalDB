@@ -3,6 +3,7 @@
 #include "QuerySession.hpp"
 #include "Server.hpp"
 #include "Table.hpp"
+#include "TableTools.hpp"
 #include "ValueTypes.hpp"
 
 #include <cstdio>
@@ -28,8 +29,13 @@ static void usage(const char* argv0) {
         "  %s repl\n"
         "  %s serve <port>\n"
         "  %s flush <table>\n"
+        "  %s verify <table>             integrity check (exit 2 on corruption)\n"
+        "  %s stats <table>              storage statistics\n"
+        "  %s backup <table> <dir>       checkpoint + checksummed copy\n"
+        "  %s restore <dir> <table>      verify checksums, restore to a new table\n"
+        "  %s compact <table>            rebuild with live rows only (renumbers row IDs)\n"
         "  %s sum <file> <col>\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static bool parseU16(const char* s, uint16_t& out) {
@@ -185,6 +191,49 @@ int main(int argc, char** argv) {
             return 0;
         } catch (const std::exception& ex) {
             std::fprintf(stderr, "flush error: %s\n", ex.what());
+            return 1;
+        }
+    }
+
+    if (cmd == "verify" || cmd == "stats" || cmd == "compact") {
+        if (argc != 3) { usage(argv[0]); return 1; }
+        const std::string base = toBaseTableName(argv[2]);
+        try {
+            if (cmd == "stats") {
+                for (const auto& [k, v] : tools::tableStats(base)) std::printf("%-16s %s\n", k.c_str(), v.c_str());
+                return 0;
+            }
+            if (cmd == "compact") {
+                const uint64_t kept = tools::compactTable(base);
+                std::printf("compacted %s: %llu live rows kept\n", base.c_str(), static_cast<unsigned long long>(kept));
+                return 0;
+            }
+            const auto rep = tools::verifyTable(base);
+            for (const auto& line : rep.info) std::printf("info:    %s\n", line.c_str());
+            for (const auto& line : rep.warnings) std::printf("warning: %s\n", line.c_str());
+            for (const auto& line : rep.errors) std::printf("ERROR:   %s\n", line.c_str());
+            std::printf("%s: %zu error(s), %zu warning(s)\n", rep.ok() ? "OK" : "CORRUPT", rep.errors.size(),
+                        rep.warnings.size());
+            return rep.ok() ? 0 : 2;
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "%s error: %s\n", cmd.c_str(), ex.what());
+            return 1;
+        }
+    }
+
+    if (cmd == "backup" || cmd == "restore") {
+        if (argc != 4) { usage(argv[0]); return 1; }
+        try {
+            if (cmd == "backup") {
+                const size_t n = tools::backupTable(toBaseTableName(argv[2]), argv[3]);
+                std::printf("backed up %zu files to %s\n", n, argv[3]);
+            } else {
+                const size_t n = tools::restoreTable(argv[2], toBaseTableName(argv[3]));
+                std::printf("restored %zu files to %s\n", n, argv[3]);
+            }
+            return 0;
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "%s error: %s\n", cmd.c_str(), ex.what());
             return 1;
         }
     }

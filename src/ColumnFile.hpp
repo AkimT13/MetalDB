@@ -44,6 +44,11 @@ public:
     std::pair<ValueType, ValueType> zoneMap(uint16_t pageID) const;
 
     ColType colType() const { return colType_; }
+    uint16_t freeListHead() const { return headPageID(); }
+    const std::string& heapPath() const { return heapPath_; }
+    uint64_t heapBytes() const;     // size of the STRING heap file (0 for other types)
+    uint64_t freeSlots() const;     // free slots on pages in this column's free-page list
+    uint16_t slotsPerPage() const;  // capacity of a freshly allocated page
 
     // For STRING columns: pack live-row strings into Arrow-style GPU layout.
     // slotIDs: one slotID per live row for this column (in rowIndex iteration order).

@@ -113,11 +113,11 @@ for ~100× speed on 10M+ row scans.
 
 ## Operations
 
-### String Heap Compaction
+### String Heap Compaction  [DONE: `mdb compact`]
 Heap files are append-only forever. A compaction pass rewrites only live strings, reclaiming
 orphaned bytes from deleted rows. Required before STRING is safe for long-running workloads.
 
-### Backup / Point-in-Time Restore
+### Backup / Point-in-Time Restore  [PARTIAL: `mdb backup` / `mdb restore` snapshots; PITR open]
 Copy data files + WAL to backup location. Replay WAL from a checkpoint to a target LSN.
 Straightforward once WAL exists.
 

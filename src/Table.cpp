@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <cassert>
 #include <stdexcept>
+#include <cerrno>
+#include <cstring>
+#include <string>
 #include <unordered_map>
 // GPU hooks (implemented in gpu_scan_equals.mm)
 extern "C" bool metalIsAvailable();
@@ -16,8 +19,8 @@ gpuScanEquals(const std::vector<uint32_t>& values,
               uint32_t needle);
 
 void Table::openOrCreate(uint16_t pageSize, uint16_t numColumns, bool create) {
-    fd_ = open(path_.c_str(), O_RDWR | O_CREAT, 0666);
-    assert(fd_ >= 0);
+    fd_ = open(path_.c_str(), create ? (O_RDWR | O_CREAT | O_TRUNC) : O_RDWR, 0666);
+    if (fd_ < 0) throw std::runtime_error("cannot open table file '" + path_ + "': " + std::strerror(errno));
 
     if (create) {
         mp_ = MasterPage::initnew(fd_, pageSize, numColumns);
@@ -220,16 +223,28 @@ std::vector<uint32_t> Table::whereOr(const std::vector<Predicate>& predicates) {
     return result;
 }
 
+// Page 0 must hold the master page (8 + 3 bytes per column) and every data page
+// must fit its 16-byte header plus at least one 8-byte slot and tombstone byte.
+static void validateGeometry(uint16_t pageSize, size_t numColumns) {
+    if (numColumns == 0)
+        throw std::invalid_argument("a table needs at least one column");
+    if (pageSize < 25 || size_t(pageSize) < 8 + 3 * numColumns)
+        throw std::invalid_argument("page size " + std::to_string(pageSize) + " is too small for " +
+                                    std::to_string(numColumns) + " column(s)");
+}
+
 Table::Table(const std::string& path, uint16_t pageSize, uint16_t numColumns)
   : path_(path), fd_(-1), rowIndex_(path, numColumns), wal_(path) {
+    validateGeometry(pageSize, numColumns);
     openOrCreate(pageSize, numColumns, /*create=*/true);
 }
 
 Table::Table(const std::string& path, uint16_t pageSize,
              const std::vector<ColType>& colTypes)
   : path_(path), fd_(-1), rowIndex_(path, static_cast<uint16_t>(colTypes.size())), wal_(path) {
-    fd_ = open(path_.c_str(), O_RDWR | O_CREAT, 0666);
-    assert(fd_ >= 0);
+    validateGeometry(pageSize, colTypes.size());
+    fd_ = open(path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
+    if (fd_ < 0) throw std::runtime_error("cannot create table file '" + path_ + "': " + std::strerror(errno));
     const uint16_t numCols = static_cast<uint16_t>(colTypes.size());
     mp_ = MasterPage::initnew(fd_, pageSize, colTypes);
     cols_.clear();
@@ -244,6 +259,10 @@ Table::Table(const std::string& path, uint16_t pageSize,
 Table::Table(const std::string& path)
   : path_(path), fd_(-1), rowIndex_(path, 0), wal_(path) {
     openOrCreate(/*pageSize*/0, /*numColumns*/0, /*create=*/false);
+}
+
+Table::~Table() {
+    if (fd_ >= 0) close(fd_);
 }
 
 std::vector<std::vector<ValueType>>
@@ -294,11 +313,33 @@ void Table::validateRow(const std::vector<ColValue>& values) const {
 
 uint32_t Table::insertTypedRow(const std::vector<ColValue>& values) {
     validateRow(values);
+    ensureCapacity({values});
     const uint32_t rowID = rowIndex_.rowsRecorded();
     const uint64_t opID = wal_.appendInsert(rowID, values);
     wal_.appendCommit(opID);
     if (syncCommit_) wal_.sync();
     return insertTypedRowInternal(values, rowID);
+}
+
+void Table::ensureCapacity(const std::vector<std::vector<ColValue>>& inserts, size_t freedPerColumn) const {
+    if (inserts.empty() || cols_.empty()) return;
+    const uint64_t pagesAvailable = cols_[0].pageCount() < UINT16_MAX ? UINT16_MAX - cols_[0].pageCount() : 0;
+    uint64_t pagesNeeded = 0;
+    for (size_t c = 0; c < cols_.size(); ++c) {
+        const uint64_t free = cols_[c].freeSlots() + freedPerColumn;
+        if (inserts.size() > free) {
+            const uint64_t perPage = cols_[c].slotsPerPage();
+            pagesNeeded += (inserts.size() - free + perPage - 1) / perPage;
+        }
+        if (cols_[c].colType() == ColType::STRING) {
+            uint64_t bytes = cols_[c].heapBytes();
+            for (const auto& row : inserts) bytes += row[c].str.size();
+            if (bytes > UINT32_MAX)
+                throw std::runtime_error("string heap is full: 4 GiB per-column limit (run `mdb compact`)");
+        }
+    }
+    if (pagesNeeded > pagesAvailable)
+        throw std::runtime_error("table is full: 65535-page limit reached (recreate it with a larger page size)");
 }
 
 std::vector<uint32_t> Table::applyAtomic(const std::vector<uint32_t>& deleteRowIDs,
@@ -315,6 +356,7 @@ std::vector<uint32_t> Table::applyAtomic(const std::vector<uint32_t>& deleteRowI
     std::vector<uint32_t> newRowIDs;
     newRowIDs.reserve(inserts.size());
     if (deletes.empty() && inserts.empty()) return newRowIDs;
+    ensureCapacity(inserts, deletes.size());
 
     // Log the whole group, commit, then apply (redo-only WAL: base files are
     // never touched before the commit record exists).

@@ -45,6 +45,28 @@ static uint16_t computeCapacity(uint16_t pageSize, uint16_t vbytes) {
     return static_cast<uint16_t>(cap > 0xFFFF ? 0xFFFF : cap);
 }
 
+uint64_t ColumnFile::heapBytes() const {
+    if (heapFd_ < 0) return 0;
+    struct stat st{};
+    if (fstat(heapFd_, &st) != 0) return 0;
+    return static_cast<uint64_t>(st.st_size);
+}
+
+uint64_t ColumnFile::freeSlots() const {
+    uint64_t total = 0;
+    uint16_t pid = headPageID();
+    for (uint32_t steps = 0; pid != UINT16_MAX && steps < 65536; ++steps) {
+        const ColumnPage& page = pageRef(pid);
+        total += page.capacity - page.count;
+        pid = page.nextFreePage;
+    }
+    return total;
+}
+
+uint16_t ColumnFile::slotsPerPage() const {
+    return computeCapacity(pageSize_, valueBytes_);
+}
+
 uint16_t ColumnFile::pageCount() const {
     struct stat st{};
     if (fstat(fd_, &st) != 0) return 0;
@@ -92,10 +114,18 @@ uint16_t ColumnFile::allocateOrFetchPage() {
     uint16_t pid = headPageID();
     if (pid == UINT16_MAX) {
         off_t end = lseek(fd_, 0, SEEK_END);
-        assert(end >= 0);
-        pid = static_cast<uint16_t>(end / pageSize_);
+        if (end < 0)
+            throw std::runtime_error(std::string("ColumnFile: seek failed: ") + std::strerror(errno));
+        // Page IDs are 16-bit and UINT16_MAX is the free-list sentinel, so a table
+        // holds at most 65535 pages (page 0 = master). Without this check the ID
+        // silently wrapped to 0 and the next flush overwrote the master page.
+        const off_t nextPid = end / pageSize_;
+        if (nextPid >= off_t(UINT16_MAX))
+            throw std::runtime_error("table is full: 65535-page limit reached (recreate it with a larger page size)");
+        pid = static_cast<uint16_t>(nextPid);
 
-        if (ftruncate(fd_, end + pageSize_) == -1) perror("ftruncate");
+        if (ftruncate(fd_, end + pageSize_) == -1)
+            throw std::runtime_error(std::string("ColumnFile: extending file failed: ") + std::strerror(errno));
 
         const uint16_t cap = computeCapacity(pageSize_, valueBytes_);
         ColumnPage page(pid, cap, valueBytes_);
@@ -234,6 +264,9 @@ uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
         case ColType::DOUBLE: { double   v = val.f64;            page.writeRaw(slot, &v, 8); break; }
         case ColType::STRING: {
             off_t end = lseek(heapFd_, 0, SEEK_END);
+            // Slots store (offset:u32, length:u32); refuse to wrap past 4 GiB.
+            if (end < 0 || uint64_t(end) + val.str.size() > UINT32_MAX)
+                throw std::runtime_error("string heap is full: 4 GiB per-column limit (run `mdb compact`)");
             uint32_t heapOff = static_cast<uint32_t>(end);
             uint32_t len     = static_cast<uint32_t>(val.str.size());
             if (len > 0 && pwrite(heapFd_, val.str.data(), len, end) != ssize_t(len))
@@ -245,8 +278,10 @@ uint32_t ColumnFile::allocTypedSlot(const ColValue& val) {
     }
     page.markUsed(slot);
 
+    // Page just filled up: pop it off this column's free-page list.
     if (page.count == page.capacity) {
-        setHeadPageID(UINT16_MAX);
+        setHeadPageID(page.nextFreePage);
+        page.nextFreePage = UINT16_MAX;
         flushMaster();
     }
     flushPage(page);
@@ -295,7 +330,11 @@ void ColumnFile::deleteSlot(uint32_t id) {
     const bool wasFull = (page.count == page.capacity);
     if (page.tombstone[slot]) page.markDeleted(slot);
 
-    if (wasFull) {
+    // A full page regained space: push it onto the free-page list, linking the
+    // previous head so that page's free slots are not forgotten (they previously
+    // were, leaking space until the table was rebuilt).
+    if (wasFull && page.count < page.capacity) {
+        page.nextFreePage = headPageID();
         setHeadPageID(pid);
         flushMaster();
     }

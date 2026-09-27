@@ -389,6 +389,39 @@ files rejected atomically, COPY (SELECT ...), durability across reopen.
 
 ---
 
+### Operations Tooling + Storage Correctness Fixes (complete)
+
+New `TableTools` module and CLI commands: `mdb verify`, `mdb stats`, `mdb backup`,
+`mdb restore`, `mdb compact` (see docs.md → Operations Tooling). Backups carry a
+MANIFEST with sizes and FNV-1a-64 checksums; restore verifies everything before writing.
+Compaction rebuilds a table from its live rows (reclaiming deleted slots, row-index
+entries, and orphaned STRING heap bytes — the roadmap's "heap compaction" item).
+
+Storage bugs found and fixed while building the verifier:
+
+- **Master-page overwrite at 65536 pages**: new page IDs were `uint16_t(end / pageSize)`
+  and silently wrapped to page 0. Now a clear "table is full" error.
+- **Free-list space leak**: a full page that regained a slot became the free-list head
+  without linking the previous head, so partially filled pages were forgotten. Pages are
+  now pushed/popped properly via `nextFreePage` (backward compatible on disk).
+- **4 GiB string heap wrap**: offsets are u32; now an explicit error.
+- **Unrecoverable committed transactions**: a WAL transaction that committed but then
+  failed to apply (e.g. out of page-ID space) could never be replayed, so the table
+  could not be reopened. `Table::ensureCapacity` now checks free slots, page-ID budget,
+  and heap limits before anything is logged.
+- Creating a table over an existing file now truncates it (stale pages used to remain);
+  opening a missing table throws instead of creating an empty file; page sizes too
+  small for the master page / one slot are rejected up front.
+- File-descriptor leaks: `Table` now closes its master fd and `RowIndex` is a move-only
+  RAII owner of its fd.
+
+Coverage: `test_tools` — verify on healthy tables, injected zone-map and row-index
+corruption detected, compact preserves data and shrinks the heap, backup/restore
+round-trip, tampered backup rejected, free-list reuse regression, page-limit
+exhaustion leaves a reopenable table, geometry validation.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility
