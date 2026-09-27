@@ -61,7 +61,13 @@ Supported query shape:
   - `-- comments` are ignored
 - optional scalar aggregates `COUNT(*)`, `COUNT(cN)`, `SUM(cN)`, `MIN(cN)`, `MAX(cN)`,
   `AVG(cN)` — several per query; `MIN` / `MAX` also work on STRING columns
-- optional `GROUP BY cN` with exactly one aggregate expression
+- optional `GROUP BY cA [, cB ...]` over keys of any type (including STRING), with any
+  number of aggregates, combinable with `WHERE`; groups are returned sorted by key.
+  A single UINT32 key with only `COUNT` / `SUM` / `AVG` over UINT32 columns and no
+  `WHERE` takes the GPU group-by path; everything else is CPU hash aggregation.
+- `SELECT DISTINCT cA [, cB ...]` (and `SELECT DISTINCT *`)
+- integer `SUM` is exact (128-bit accumulator); `DOUBLE` values print with 15
+  significant digits, `FLOAT` with 7
 - optional `ORDER BY key [ASC|DESC] [, ...]` where `key` is a selected column, a selected
   aggregate (`count(*)`, `sum(c1)`, ...) or a 1-based output position
 - optional `LIMIT n [OFFSET m]`
@@ -87,7 +93,7 @@ Important limits:
 - columns are synthetic identifiers `c0`, `c1`, ...
 - joins, aliases, arithmetic expressions, subqueries, and CTEs are not supported
 - `ORDER BY` keys must appear in the `SELECT` list
-- `GROUP BY ... WHERE ...` is not supported yet
+- no `HAVING` yet
 
 Output is tab-separated with a header row.
 

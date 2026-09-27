@@ -118,10 +118,34 @@ int main() {
             assert(r.rows.size() == 1 && r.rows[0][0] == "2");
         }
         assertThrows("SELECT c9 FROM '/tmp/sql_main'", e);
-        assertThrows("SELECT c0 FROM '/tmp/sql_main' GROUP BY c0", e);
-        assertThrows("SELECT c0, count(*) FROM '/tmp/sql_main' WHERE c0 = 1 GROUP BY c0", e);
-        assertThrows("SELECT c2, count(*) FROM '/tmp/sql_main' GROUP BY c2", e);
-        assertThrows("SELECT c1, count(*) FROM '/tmp/sql_main' GROUP BY c0", e);
+        assertThrows("SELECT c1, count(*) FROM '/tmp/sql_main' GROUP BY c0", e);  // c1 not grouped
+        assertThrows("SELECT c0, count(*) FROM '/tmp/sql_main'", e);              // mixed without GROUP BY
+        assertThrows("SELECT DISTINCT count(*) FROM '/tmp/sql_main'", e);
+
+        // GROUP BY v2: key-only, WHERE, STRING keys, multiple keys and aggregates.
+        {
+            auto r = executeMiniSQL(e, "SELECT c0 FROM '/tmp/sql_main' GROUP BY c0");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"1"}, {"2"}, {"3"}}));
+            r = executeMiniSQL(e, "SELECT c0, count(*) FROM '/tmp/sql_main' WHERE c1 >= 20 GROUP BY c0");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"2", "2"}, {"3", "1"}}));
+            r = executeMiniSQL(e, "SELECT c2, count(*), sum(c1), min(c0), max(c1), avg(c1) FROM '/tmp/sql_main' GROUP BY c2");
+            assert((r.headers == std::vector<std::string>{"c2", "count(*)", "sum(c1)", "min(c0)", "max(c1)", "avg(c1)"}));
+            assert((r.rows == std::vector<std::vector<std::string>>{
+                {"alice", "2", "40", "1", "30", "20"}, {"bob", "1", "20", "2", "20", "20"}, {"carol", "1", "40", "3", "40", "40"}}));
+            r = executeMiniSQL(e, "SELECT c0, c2, count(*) FROM '/tmp/sql_main' GROUP BY c0, c2 ORDER BY c0 DESC, c2");
+            assert((r.rows == std::vector<std::vector<std::string>>{
+                {"3", "carol", "1"}, {"2", "alice", "1"}, {"2", "bob", "1"}, {"1", "alice", "1"}}));
+            r = executeMiniSQL(e, "SELECT count(*), c2 FROM '/tmp/sql_main' GROUP BY c2 ORDER BY 1 DESC, c2 LIMIT 1");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"2", "alice"}}));
+            r = executeMiniSQL(e, "SELECT DISTINCT c2 FROM '/tmp/sql_main' ORDER BY c2 DESC");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"carol"}, {"bob"}, {"alice"}}));
+            r = executeMiniSQL(e, "SELECT DISTINCT c0 FROM '/tmp/sql_main' WHERE c2 != 'carol'");
+            assert((r.rows == std::vector<std::vector<std::string>>{{"1"}, {"2"}}));
+            r = executeMiniSQL(e, "SELECT c0, sum(c1), avg(c1) FROM '/tmp/sql_main' GROUP BY c0");  // fast path
+            assert((r.rows == std::vector<std::vector<std::string>>{{"1", "10", "10"}, {"2", "50", "25"}, {"3", "40", "40"}}));
+            r = executeMiniSQL(e, "SELECT min(c2), max(c2), count(c2) FROM '/tmp/sql_main'");
+            assert((r.rows[0] == std::vector<std::string>{"alice", "carol", "4"}));
+        }
     }
 
     {

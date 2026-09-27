@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <unordered_map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -22,30 +24,111 @@ using namespace sql;
 
 namespace {
 
-struct AggregateState {
-    uint64_t count = 0;
-    long double sum = 0.0;
-    ColValue min;
-    ColValue max;
-    bool hasValue = false;
-};
+// ── value formatting ─────────────────────────────────────────────────────────
+
+std::string formatDouble(double v) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.15g", v);
+    return buf;
+}
+
+std::string formatInt128(__int128 v) {
+    if (v == 0) return "0";
+    const bool neg = v < 0;
+    unsigned __int128 u = neg ? static_cast<unsigned __int128>(-(v + 1)) + 1 : static_cast<unsigned __int128>(v);
+    std::string out;
+    while (u > 0) {
+        out.push_back(static_cast<char>('0' + static_cast<int>(u % 10)));
+        u /= 10;
+    }
+    if (neg) out.push_back('-');
+    std::reverse(out.begin(), out.end());
+    return out;
+}
 
 std::string formatColValue(const ColValue& value) {
-    std::ostringstream out;
+    char buf[64];
     switch (value.type) {
         case ColType::UINT32: return std::to_string(value.u32);
         case ColType::INT64: return std::to_string(value.i64);
         case ColType::FLOAT:
-            out << value.f32;
-            return out.str();
-        case ColType::DOUBLE:
-            out << value.f64;
-            return out.str();
-        case ColType::STRING:
-            return value.str;
+            std::snprintf(buf, sizeof(buf), "%.7g", static_cast<double>(value.f32));
+            return buf;
+        case ColType::DOUBLE: return formatDouble(value.f64);
+        case ColType::STRING: return value.str;
     }
     return "";
 }
+
+// ── aggregates ───────────────────────────────────────────────────────────────
+
+struct AggregateState {
+    uint64_t count = 0;
+    __int128 intSum = 0;      // exact sum for UINT32 / INT64 inputs
+    long double floatSum = 0; // FLOAT / DOUBLE inputs
+    ColValue min;
+    ColValue max;
+    bool hasValue = false;
+
+    void add(const ColValue& v) {
+        if (!hasValue) {
+            min = v;
+            max = v;
+            hasValue = true;
+        } else {
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+        ++count;
+        switch (v.type) {
+            case ColType::UINT32: intSum += v.u32; break;
+            case ColType::INT64: intSum += v.i64; break;
+            case ColType::FLOAT: floatSum += v.f32; break;
+            case ColType::DOUBLE: floatSum += v.f64; break;
+            case ColType::STRING: break;
+        }
+    }
+};
+
+bool isIntegral(ColType t) { return t == ColType::UINT32 || t == ColType::INT64; }
+
+ColType aggregateType(const Table& table, const SelectItem& item) {
+    switch (item.kind) {
+        case SelectItem::Kind::CountStar:
+        case SelectItem::Kind::Count:
+            return ColType::INT64;
+        case SelectItem::Kind::Sum:
+            return isIntegral(table.columnFile(item.column.index).colType()) ? ColType::INT64 : ColType::DOUBLE;
+        case SelectItem::Kind::Avg:
+            return ColType::DOUBLE;
+        default:
+            return table.columnFile(item.column.index).colType();
+    }
+}
+
+std::string formatAggregate(const Table& table, const SelectItem& item, const AggregateState& state) {
+    switch (item.kind) {
+        case SelectItem::Kind::CountStar:
+        case SelectItem::Kind::Count:
+            return std::to_string(state.count);
+        case SelectItem::Kind::Sum:
+            if (isIntegral(table.columnFile(item.column.index).colType())) return formatInt128(state.intSum);
+            return formatDouble(static_cast<double>(state.floatSum));
+        case SelectItem::Kind::Min:
+            return state.hasValue ? formatColValue(state.min) : "";
+        case SelectItem::Kind::Max:
+            return state.hasValue ? formatColValue(state.max) : "";
+        case SelectItem::Kind::Avg: {
+            if (state.count == 0) return "";
+            const long double total = static_cast<long double>(state.intSum) + state.floatSum;
+            return formatDouble(static_cast<double>(total / static_cast<long double>(state.count)));
+        }
+        default:
+            throw std::invalid_argument("not an aggregate");
+    }
+}
+
+// ── validation ───────────────────────────────────────────────────────────────
 
 void validateColumnRef(const Table& table, uint16_t colIdx) {
     if (colIdx >= table.numColumns())
@@ -87,39 +170,34 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
 
     if (hasStar && query.selectItems.size() != 1)
         throw std::invalid_argument("SELECT * cannot be combined with other projections");
-    if (hasStar && query.hasGroupBy)
-        throw std::invalid_argument("SELECT * with GROUP BY is not supported");
-
     if (query.where) validateWhere(table, *query.where);
 
-    if (query.hasGroupBy) {
-        validateColumnRef(table, query.groupBy.index);
-        if (query.where)
-            throw std::invalid_argument("GROUP BY with WHERE is not supported in mini-SQL v1");
-        if (aggregateCount != 1)
-            throw std::invalid_argument("GROUP BY queries require exactly one aggregate expression");
-        if (query.selectItems.size() != 2 ||
-            query.selectItems[0].kind != SelectItem::Kind::Column ||
-            query.selectItems[0].column.index != query.groupBy.index) {
-            throw std::invalid_argument("GROUP BY queries must select the group key first");
-        }
-        const auto& agg = query.selectItems[1];
-        if (agg.kind != SelectItem::Kind::CountStar && agg.kind != SelectItem::Kind::Count) {
-            if (table.columnFile(query.groupBy.index).colType() != ColType::UINT32 ||
-                table.columnFile(agg.column.index).colType() != ColType::UINT32) {
-                throw std::invalid_argument("GROUP BY v1 supports UINT32 key/value columns only");
-            }
-        } else if (table.columnFile(query.groupBy.index).colType() != ColType::UINT32) {
-            throw std::invalid_argument("GROUP BY v1 supports UINT32 key columns only");
+    if (query.distinct) {
+        if (aggregateCount > 0 || !query.groupBy.empty())
+            throw std::invalid_argument("SELECT DISTINCT cannot be combined with aggregates or GROUP BY");
+        return;
+    }
+
+    if (!query.groupBy.empty()) {
+        if (hasStar) throw std::invalid_argument("SELECT * with GROUP BY is not supported");
+        for (const auto& key : query.groupBy) validateColumnRef(table, key.index);
+        for (const auto& item : query.selectItems) {
+            if (item.kind != SelectItem::Kind::Column) continue;
+            const bool grouped = std::any_of(query.groupBy.begin(), query.groupBy.end(),
+                                             [&](const ColumnRef& k) { return k.index == item.column.index; });
+            if (!grouped)
+                throw std::invalid_argument("column " + item.column.text +
+                                            " must appear in GROUP BY or be used in an aggregate");
         }
         return;
     }
 
-    if (aggregateCount > 0) {
-        if (hasColumn || hasStar)
-            throw std::invalid_argument("aggregate queries cannot mix aggregates with plain columns");
-    }
+    if (aggregateCount > 0 && (hasColumn || hasStar))
+        throw std::invalid_argument("column " + std::string(hasStar ? "*" : "references") +
+                                    " cannot be mixed with aggregates without GROUP BY");
 }
+
+// ── SELECT execution ─────────────────────────────────────────────────────────
 
 std::vector<uint32_t> executeWhere(Table& table, const ParsedQuery& query) {
     if (!query.where) return allLiveRowIDs(table);
@@ -131,15 +209,13 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
     MiniSQLResult result;
 
     if (query.selectItems.size() == 1 && query.selectItems[0].kind == SelectItem::Kind::Star) {
-        for (uint16_t c = 0; c < table.numColumns(); ++c) {
-            cols.push_back(c);
-            result.headers.push_back("c" + std::to_string(c));
-        }
+        for (uint16_t c = 0; c < table.numColumns(); ++c) cols.push_back(c);
     } else {
-        for (const auto& item : query.selectItems) {
-            cols.push_back(item.column.index);
-            result.headers.push_back(item.header());
-        }
+        for (const auto& item : query.selectItems) cols.push_back(item.column.index);
+    }
+    for (uint16_t c : cols) {
+        result.headers.push_back("c" + std::to_string(c));
+        result.types.push_back(table.columnFile(c).colType());
     }
 
     // Without ORDER BY, LIMIT/OFFSET can stop materializing early.
@@ -169,100 +245,165 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
     return result;
 }
 
-AggregateState computeAggregate(Table& table, const std::vector<uint32_t>& rowIDs, const SelectItem& item) {
-    AggregateState state;
-    if (item.kind == SelectItem::Kind::CountStar) {
-        state.count = rowIDs.size();
-        return state;
-    }
-    for (uint32_t rowID : rowIDs) {
-        auto cell = table.fetchTypedValue(rowID, item.column.index);
-        if (!cell) continue;
-        if (!state.hasValue) {
-            state.min = *cell;
-            state.max = *cell;
-            state.hasValue = true;
-        } else {
-            if (*cell < state.min) state.min = *cell;
-            if (*cell > state.max) state.max = *cell;
-        }
-        ++state.count;
-        state.sum += cell->toDouble();
-    }
-    return state;
-}
-
-std::string formatAggregate(const SelectItem& item, const AggregateState& state) {
-    switch (item.kind) {
-        case SelectItem::Kind::CountStar:
-        case SelectItem::Kind::Count:
-            return std::to_string(state.count);
-        case SelectItem::Kind::Sum:
-            return state.count == 0 ? "0" : formatColValue(ColValue(static_cast<double>(state.sum)));
-        case SelectItem::Kind::Min:
-            return state.hasValue ? formatColValue(state.min) : "";
-        case SelectItem::Kind::Max:
-            return state.hasValue ? formatColValue(state.max) : "";
-        case SelectItem::Kind::Avg: {
-            std::ostringstream out;
-            out << (state.count == 0 ? 0.0L : state.sum / static_cast<long double>(state.count));
-            return out.str();
-        }
-        default:
-            throw std::invalid_argument("not an aggregate");
-    }
-}
-
 MiniSQLResult executeScalarAggregateQuery(Table& table, const ParsedQuery& query) {
     const auto rowIDs = executeWhere(table, query);
     MiniSQLResult result;
     std::vector<std::string> row;
     for (const auto& item : query.selectItems) {
+        AggregateState state;
+        if (item.kind == SelectItem::Kind::CountStar) {
+            state.count = rowIDs.size();
+        } else {
+            for (uint32_t rowID : rowIDs)
+                if (auto cell = table.fetchTypedValue(rowID, item.column.index)) state.add(*cell);
+        }
         result.headers.push_back(item.header());
-        row.push_back(formatAggregate(item, computeAggregate(table, rowIDs, item)));
+        result.types.push_back(aggregateType(table, item));
+        row.push_back(formatAggregate(table, item, state));
     }
     result.rows.push_back(std::move(row));
     return result;
 }
 
-template <typename Map, typename Format>
-void appendSortedGroups(const Map& groups, MiniSQLResult& result, Format format) {
-    std::vector<std::pair<typename Map::key_type, typename Map::mapped_type>> rows(groups.begin(), groups.end());
-    std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-    for (const auto& [key, value] : rows) result.rows.push_back({std::to_string(key), format(value)});
+void setGroupedHeaders(const Table& table, const ParsedQuery& query, MiniSQLResult& result) {
+    for (const auto& item : query.selectItems) {
+        result.headers.push_back(item.header());
+        result.types.push_back(item.isAggregate() ? aggregateType(table, item)
+                                                  : table.columnFile(item.column.index).colType());
+    }
 }
 
-MiniSQLResult executeGroupByQuery(Engine& engine, const ParsedQuery& query) {
-    MiniSQLResult result;
-    const auto& agg = query.selectItems[1];
-    result.headers = {query.selectItems[0].header(), agg.header()};
-    const auto toStr = [](const auto& v) { return std::to_string(v); };
-
-    switch (agg.kind) {
-        case SelectItem::Kind::CountStar:
-        case SelectItem::Kind::Count:
-            appendSortedGroups(engine.groupCount(query.tableName, query.groupBy.index), result, toStr);
-            return result;
-        case SelectItem::Kind::Sum:
-            appendSortedGroups(engine.groupSum(query.tableName, query.groupBy.index, agg.column.index), result, toStr);
-            return result;
-        case SelectItem::Kind::Min:
-            appendSortedGroups(engine.groupMin(query.tableName, query.groupBy.index, agg.column.index), result, toStr);
-            return result;
-        case SelectItem::Kind::Max:
-            appendSortedGroups(engine.groupMax(query.tableName, query.groupBy.index, agg.column.index), result, toStr);
-            return result;
-        case SelectItem::Kind::Avg:
-            appendSortedGroups(engine.groupAvg(query.tableName, query.groupBy.index, agg.column.index), result,
-                               [](double v) {
-                                   std::ostringstream out;
-                                   out << v;
-                                   return out.str();
-                               });
-            return result;
-        default:
-            throw std::invalid_argument("unsupported GROUP BY aggregate");
+// GPU-capable fast path: one UINT32 key, no WHERE, only COUNT / SUM / AVG over
+// UINT32 columns. Routes through GroupBy::countByKey / sumByKey, which dispatch to
+// the Metal group-by kernel for large tables.
+bool tryFastGroupBy(Engine& engine, Table& table, const ParsedQuery& query,
+                    const std::vector<ColumnRef>& keys, MiniSQLResult& result) {
+    if (keys.size() != 1 || query.where) return false;
+    const uint16_t keyCol = keys[0].index;
+    if (table.columnFile(keyCol).colType() != ColType::UINT32) return false;
+    for (const auto& item : query.selectItems) {
+        switch (item.kind) {
+            case SelectItem::Kind::Column:
+            case SelectItem::Kind::CountStar:
+            case SelectItem::Kind::Count:
+                break;
+            case SelectItem::Kind::Sum:
+            case SelectItem::Kind::Avg:
+                if (table.columnFile(item.column.index).colType() != ColType::UINT32) return false;
+                break;
+            default:
+                return false;
+        }
     }
+
+    const auto counts = engine.groupCount(query.tableName, keyCol);
+    std::unordered_map<uint16_t, std::unordered_map<ValueType, uint64_t>> sums;
+    for (const auto& item : query.selectItems)
+        if ((item.kind == SelectItem::Kind::Sum || item.kind == SelectItem::Kind::Avg) && !sums.count(item.column.index))
+            sums[item.column.index] = engine.groupSum(query.tableName, keyCol, item.column.index);
+
+    std::vector<ValueType> orderedKeys;
+    orderedKeys.reserve(counts.size());
+    for (const auto& [k, n] : counts) orderedKeys.push_back(k);
+    std::sort(orderedKeys.begin(), orderedKeys.end());
+
+    setGroupedHeaders(table, query, result);
+    for (ValueType k : orderedKeys) {
+        const uint64_t n = counts.at(k);
+        std::vector<std::string> row;
+        for (const auto& item : query.selectItems) {
+            switch (item.kind) {
+                case SelectItem::Kind::Column: row.push_back(std::to_string(k)); break;
+                case SelectItem::Kind::Sum: row.push_back(std::to_string(sums[item.column.index][k])); break;
+                case SelectItem::Kind::Avg:
+                    row.push_back(formatDouble(static_cast<double>(sums[item.column.index][k]) / static_cast<double>(n)));
+                    break;
+                default: row.push_back(std::to_string(n)); break;
+            }
+        }
+        result.rows.push_back(std::move(row));
+    }
+    return true;
+}
+
+// Generic hash aggregation over any key types (including STRING and multi-column
+// keys), any aggregates, with or without WHERE. Groups come out sorted by key.
+MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuery& query,
+                                  const std::vector<ColumnRef>& keys) {
+    MiniSQLResult result;
+    if (tryFastGroupBy(engine, table, query, keys, result)) return result;
+
+    struct Group {
+        std::vector<ColValue> key;
+        std::vector<AggregateState> aggs;
+    };
+    std::vector<Group> groups;
+    std::unordered_map<std::string, size_t> index;
+
+    const auto rowIDs = executeWhere(table, query);
+    std::string encoded;
+    std::vector<ColValue> key(keys.size());
+    for (uint32_t rowID : rowIDs) {
+        encoded.clear();
+        bool live = true;
+        for (size_t k = 0; k < keys.size() && live; ++k) {
+            auto v = table.fetchTypedValue(rowID, keys[k].index);
+            if (!v) {
+                live = false;
+                break;
+            }
+            key[k] = std::move(*v);
+            // Self-delimiting encoding: type tag + fixed-width bytes, or length-prefixed string.
+            encoded.push_back(static_cast<char>(key[k].type));
+            if (key[k].type == ColType::STRING) {
+                const uint32_t len = static_cast<uint32_t>(key[k].str.size());
+                encoded.append(reinterpret_cast<const char*>(&len), sizeof(len));
+                encoded.append(key[k].str);
+            } else {
+                encoded.append(reinterpret_cast<const char*>(&key[k].i64),
+                               colValueBytes(key[k].type));
+            }
+        }
+        if (!live) continue;
+
+        auto [it, inserted] = index.emplace(encoded, groups.size());
+        if (inserted) groups.push_back({key, std::vector<AggregateState>(query.selectItems.size())});
+        Group& g = groups[it->second];
+        for (size_t i = 0; i < query.selectItems.size(); ++i) {
+            const auto& item = query.selectItems[i];
+            if (!item.isAggregate()) continue;
+            if (item.kind == SelectItem::Kind::CountStar) {
+                ++g.aggs[i].count;
+            } else if (auto cell = table.fetchTypedValue(rowID, item.column.index)) {
+                g.aggs[i].add(*cell);
+            }
+        }
+    }
+
+    std::sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) {
+        for (size_t k = 0; k < a.key.size(); ++k) {
+            if (a.key[k] < b.key[k]) return true;
+            if (b.key[k] < a.key[k]) return false;
+        }
+        return false;
+    });
+
+    setGroupedHeaders(table, query, result);
+    for (const auto& g : groups) {
+        std::vector<std::string> row;
+        for (size_t i = 0; i < query.selectItems.size(); ++i) {
+            const auto& item = query.selectItems[i];
+            if (item.isAggregate()) {
+                row.push_back(formatAggregate(table, item, g.aggs[i]));
+            } else {
+                size_t k = 0;
+                while (keys[k].index != item.column.index) ++k;
+                row.push_back(formatColValue(g.key[k]));
+            }
+        }
+        result.rows.push_back(std::move(row));
+    }
+    return result;
 }
 
 bool tableExists(const std::string& tableName) {
@@ -279,6 +420,7 @@ Table& openExistingTable(Engine& engine, const std::string& tableName) {
 MiniSQLResult rowsAffected(size_t n) {
     MiniSQLResult result;
     result.headers.push_back("rows_affected");
+    result.types.push_back(ColType::INT64);
     result.rows.push_back({std::to_string(n)});
     return result;
 }
@@ -291,6 +433,7 @@ MiniSQLResult executeCreateTable(Engine& engine, const ParsedStatement& stmt) {
 
     MiniSQLResult result;
     result.headers.push_back("created");
+    result.types.push_back(ColType::STRING);
     result.rows.push_back({name});
     return result;
 }
@@ -361,24 +504,13 @@ MiniSQLResult executeDescribe(Engine& engine, const ParsedStatement& stmt) {
     Table& table = openExistingTable(engine, stmt.query.tableName);
     MiniSQLResult result;
     result.headers = {"column", "type"};
+    result.types = {ColType::STRING, ColType::STRING};
     for (uint16_t c = 0; c < table.numColumns(); ++c)
         result.rows.push_back({"c" + std::to_string(c), colTypeName(table.columnFile(c).colType())});
     return result;
 }
 
-bool outputColumnIsNumeric(const Table& table, const ParsedQuery& query, size_t idx) {
-    if (query.hasGroupBy) return true;  // UINT32 key + numeric aggregate
-    const auto& first = query.selectItems.front();
-    if (first.kind == SelectItem::Kind::Star)
-        return table.columnFile(static_cast<uint16_t>(idx)).colType() != ColType::STRING;
-    const auto& item = query.selectItems[idx];
-    if (item.kind == SelectItem::Kind::Column || item.kind == SelectItem::Kind::Min ||
-        item.kind == SelectItem::Kind::Max)
-        return table.columnFile(item.column.index).colType() != ColType::STRING;
-    return true;
-}
-
-void applyOrderAndLimit(const Table& table, const ParsedQuery& query, MiniSQLResult& result,
+void applyOrderAndLimit(const ParsedQuery& query, MiniSQLResult& result,
                         bool limitAlreadyApplied) {
     if (!query.orderBy.empty()) {
         struct ResolvedKey {
@@ -399,7 +531,7 @@ void applyOrderAndLimit(const Table& table, const ParsedQuery& query, MiniSQLRes
                     throw std::invalid_argument("ORDER BY " + key.header + " must appear in the SELECT list");
                 idx = static_cast<size_t>(it - result.headers.begin());
             }
-            keys.push_back({idx, outputColumnIsNumeric(table, query, idx), key.descending});
+            keys.push_back({idx, result.types[idx] != ColType::STRING, key.descending});
         }
 
         // Empty cells (e.g. MIN over no rows) sort before any value.
@@ -441,8 +573,26 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
 
     MiniSQLResult result;
     bool limitApplied = false;
-    if (query.hasGroupBy) {
-        result = executeGroupByQuery(engine, query);
+    if (query.distinct) {
+        // DISTINCT == GROUP BY every selected column.
+        ParsedQuery grouped = query;
+        grouped.distinct = false;
+        if (grouped.selectItems.size() == 1 && grouped.selectItems[0].kind == SelectItem::Kind::Star) {
+            grouped.selectItems.clear();
+            for (uint16_t c = 0; c < table.numColumns(); ++c) {
+                SelectItem item;
+                item.column = {c, "c" + std::to_string(c)};
+                grouped.selectItems.push_back(item);
+            }
+        }
+        for (const auto& item : grouped.selectItems) {
+            const bool seen = std::any_of(grouped.groupBy.begin(), grouped.groupBy.end(),
+                                          [&](const ColumnRef& k) { return k.index == item.column.index; });
+            if (!seen) grouped.groupBy.push_back(item.column);
+        }
+        result = executeGroupedQuery(engine, table, grouped, grouped.groupBy);
+    } else if (!query.groupBy.empty()) {
+        result = executeGroupedQuery(engine, table, query, query.groupBy);
     } else if (aggregateQuery) {
         result = executeScalarAggregateQuery(table, query);
     } else {
@@ -450,7 +600,7 @@ MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
         limitApplied = query.orderBy.empty();
     }
 
-    applyOrderAndLimit(table, query, result, limitApplied);
+    applyOrderAndLimit(query, result, limitApplied);
     return result;
 }
 
