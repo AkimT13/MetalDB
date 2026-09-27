@@ -22,9 +22,24 @@ make fast TEST=test_engine
 
 # Clean binaries, object files, and all .mdb / .mdb.idx data files
 make clean
+
+# Portable CPU-only build + tests (no Metal needed — works on Linux / CI).
+# Links gpu_cpu_stub.cpp instead of the .mm GPU sources; output in src/build-cpu/.
+make cpu-run
 ```
 
-Test binaries: `test_engine`, `test_groupby`, `test_gpu_scan_equals`, `test_gpu_sum`, `test_scan_hybrid`, `test_persist_pages`, `test_where_range`, `test_join`.
+When working without a Mac (e.g. cloud sessions), use `make cpu-run` to verify changes.
+GPU paths cannot be exercised there — write GPU tests so they compare the GPU result
+against a CPU reference (they then also pass in the CPU build) and ask the user to run
+`make run` on Apple Silicon.
+
+Test binaries are listed in `TESTS` (Metal build) and `CPU_TESTS` (portable build) in `src/Makefile`.
+
+## Git Workflow
+
+The repository owner has authorized pushing directly to `main`. Commit each coherent
+increment separately and push it to `main` (fetch first and make sure the push is a
+fast-forward; never force-push). Update `PROGRESS.md` in the same commit as the feature.
 
 ## Architecture
 

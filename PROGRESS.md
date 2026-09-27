@@ -260,6 +260,22 @@ Verified (CPU path, Metal entry points stubbed): `test_mini_sql`, `test_engine`,
 
 ---
 
+### Build Hygiene — Portable CPU Build + CI (complete)
+
+- `make cpu` / `make cpu-run` build the engine without Metal (`src/gpu_cpu_stub.cpp`
+  stands in for the `.mm` sources) into `src/build-cpu/`, and run 19 test binaries.
+  Works on Linux and on Macs without the Metal toolchain.
+- GitHub Actions CI (`.github/workflows/ci.yml`): CPU suite on Linux (gcc + clang) and macOS.
+- Root `Makefile` now delegates to `src/Makefile` (it referenced deleted sources).
+- `.gitignore` no longer ignores `src/tests/test_*` sources — this is why
+  `tests/test_string_gpu.cpp` was referenced by the Makefile but never committed.
+  Added that test: GPU string equality vs. CPU reference over 60k rows with empty
+  strings, prefix needles, multi-byte UTF-8, and deleted rows.
+- `test_types` portability fix (`int64_t` vs `long long` overload ambiguity on Linux).
+- Restored `Table::rowCount()` so the older `test_table` compiles again.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Step — Postgres Wire Compatibility

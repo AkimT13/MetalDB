@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cpu-linux:
+    name: CPU build + tests (Linux, ${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cxx: g++
+            cc: gcc
+          - compiler: clang
+            cxx: clang++
+            cc: clang
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run CPU test suite
+        run: make -C src cpu-run CPU_CXX=${{ matrix.cxx }} CPU_CC=${{ matrix.cc }}
+
+  cpu-macos:
+    name: CPU build + tests (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run CPU test suite
+        run: make -C src cpu-run CPU_CXX=clang++ CPU_CC=clang

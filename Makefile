@@ -1,67 +1,17 @@
-CXX      := clang++
-CXXFLAGS := -std=c++17 -arch arm64 -I/usr/local/share/metal-cpp -g -MMD -MP
-LDFLAGS  := -framework Metal -framework Foundation
+# Thin wrapper around src/Makefile, which is the maintained build.
+#
+#   make                 # Metal build: shaders, CLI, and test binaries (macOS)
+#   make run             # build and run the full (GPU + CPU) test suite
+#   make fast TEST=test_engine
+#   make cpu-run         # portable CPU-only build + tests (Linux / CI / no Metal)
+#   make clean
 
-SRCS := MasterPage.cpp Column.cpp ColumnFile.cpp RowIndex.cpp Table.cpp \
-        gpu_scan_equals.mm gpu_sum.mm gpu_scan_range.mm \
-        Engine.cpp GroupBy.cpp Join.cpp GpuContext.mm
-OBJS := $(SRCS:.cpp=.o)
-OBJS := $(OBJS:.mm=.o)
-DEPS := $(OBJS:.o=.d)
+.DEFAULT_GOAL := all
 
-TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages test_where_range \
-         test_engine test_groupby test_join
+Makefile: ;
 
-all: $(TESTS)
+%:
+	$(MAKE) -C src $@
 
-%.o: %.mm
-	$(CXX) $(CXXFLAGS) -c $< -o $@
-
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
-
-test_gpu_scan_equals: $(OBJS) tests/test_gpu_scan_equals.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-test_gpu_sum: $(OBJS) tests/test_gpu_sum.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-test_scan_hybrid: $(OBJS) tests/test_scan_hybrid.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-test_persist_pages: $(OBJS) tests/test_persist_pages.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-test_where_range: $(OBJS) tests/test_where_range.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-test_engine: $(OBJS) tests/test_engine.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-test_groupby: $(OBJS) tests/test_groupby.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-test_join: $(OBJS) tests/test_join.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-.PHONY: run clean fast
-
-run: all
-	./test_gpu_scan_equals
-	./test_gpu_sum
-	./test_scan_hybrid
-	./test_persist_pages
-	./test_where_range
-	./test_engine
-	./test_groupby
-	./test_join
-
-fast: $(TESTS)
-	@if [ -z "$(TEST)" ]; then echo "Usage: make fast TEST=<binary>"; exit 1; fi
-	./$(TEST)
-
-clean:
-	rm -f $(OBJS) $(DEPS) $(TESTS)
-	rm -f /tmp/table_* *.mdb *.mdb.idx
-
--include $(DEPS)
+all:
+	$(MAKE) -C src all
