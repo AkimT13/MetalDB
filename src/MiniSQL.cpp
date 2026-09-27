@@ -54,13 +54,24 @@ std::string fmtMs(double ms) {
 
 // ── value formatting ─────────────────────────────────────────────────────────
 
-// Display precision by default; COPY TO switches to round-trip precision so an
-// export → import cycle is lossless.
-thread_local bool g_roundTripFloats = false;
-
+// Shortest decimal that parses back to exactly the same value (like PostgreSQL 12+):
+// 19.99 prints as "19.99", 0.1 + 0.2 as "0.30000000000000004". Lossless for COPY
+// export → import and readable for display.
 std::string formatDouble(double v) {
     char buf[64];
-    std::snprintf(buf, sizeof(buf), g_roundTripFloats ? "%.17g" : "%.15g", v);
+    for (int precision = 15; precision <= 17; ++precision) {
+        std::snprintf(buf, sizeof(buf), "%.*g", precision, v);
+        if (precision == 17 || std::strtod(buf, nullptr) == v) break;
+    }
+    return buf;
+}
+
+std::string formatFloat(float v) {
+    char buf[64];
+    for (int precision = 6; precision <= 9; ++precision) {
+        std::snprintf(buf, sizeof(buf), "%.*g", precision, static_cast<double>(v));
+        if (precision == 9 || std::strtof(buf, nullptr) == v) break;
+    }
     return buf;
 }
 
@@ -79,13 +90,10 @@ std::string formatInt128(__int128 v) {
 }
 
 std::string formatColValue(const ColValue& value) {
-    char buf[64];
     switch (value.type) {
         case ColType::UINT32: return std::to_string(value.u32);
         case ColType::INT64: return std::to_string(value.i64);
-        case ColType::FLOAT:
-            std::snprintf(buf, sizeof(buf), g_roundTripFloats ? "%.9g" : "%.7g", static_cast<double>(value.f32));
-            return buf;
+        case ColType::FLOAT: return formatFloat(value.f32);
         case ColType::DOUBLE: return formatDouble(value.f64);
         case ColType::STRING: return value.str;
     }
@@ -705,10 +713,6 @@ MiniSQLResult executeCopyFrom(Engine& engine, const ParsedStatement& stmt) {
 // and renames it into place, so readers never observe a half-written export.
 MiniSQLResult executeCopyTo(Engine& engine, const ParsedStatement& stmt) {
     MiniSQLResult data;
-    g_roundTripFloats = true;
-    struct Reset {
-        ~Reset() { g_roundTripFloats = false; }
-    } reset;
     if (stmt.copyQuery) {
         data = executeSelect(engine, stmt.query);
     } else {

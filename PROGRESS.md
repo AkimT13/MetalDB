@@ -350,7 +350,7 @@ no-match UPDATE, type / range / duplicate-column errors, reopen consistency).
 - `SELECT DISTINCT` (rewritten to GROUP BY over the selected columns).
 - Aggregates are exact: integer SUM uses a 128-bit accumulator (previously summed in
   `long double` and printed with 6 significant digits, e.g. `1.23457e+07`); DOUBLE
-  output uses 15 significant digits.
+  output uses the shortest round-trip decimal (see COPY section).
 - `MiniSQLResult::types` reports each output column's logical type (used by ORDER BY,
   and by the upcoming Postgres wire protocol for column type OIDs).
 
@@ -381,7 +381,8 @@ concurrent sessions never mix plans. REPL gains `.timer on|off`.
   large WAL. Errors name the CSV record number; the table is left unchanged.
 - `COPY '<table>' TO '<file>'` and `COPY (SELECT ...) TO '<file>' [WITH HEADER]`:
   writes `<file>.tmp` and renames into place (no half-written exports). DOUBLE / FLOAT
-  are written with round-trip precision (%.17g / %.9g) so export → import is bit-exact.
+  are written as the shortest decimal that round-trips exactly (15–17 / 6–9 digits,
+  like PostgreSQL 12+), so export → import is bit-exact and output stays readable.
 
 Coverage: `test_copy` — all column types, strings with commas / quotes / newlines /
 padding / empty, bit-exact float round trip, CRLF + blank lines, five kinds of bad

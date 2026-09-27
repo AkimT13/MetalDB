@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <tuple>
@@ -37,6 +38,16 @@ std::string i128(__int128 v) {
 }
 
 using Rows = std::vector<std::vector<std::string>>;
+
+// Mirrors the engine's float formatting: shortest round-trip representation.
+std::string shortest(double v) {
+    char buf[64];
+    for (int p = 15; p <= 17; ++p) {
+        std::snprintf(buf, sizeof(buf), "%.*g", p, v);
+        if (p == 17 || std::strtod(buf, nullptr) == v) break;
+    }
+    return buf;
+}
 
 Rows query(Engine& e, const std::string& sql) {
     return executeMiniSQL(e, sql).rows;
@@ -107,8 +118,7 @@ int main() {
             }
             Rows want;
             for (auto& [k, v] : ref) {
-                char avg[64];
-                std::snprintf(avg, sizeof(avg), "%.15g", double(std::get<1>(v)) / double(std::get<0>(v)));
+                const std::string avg = shortest(double(std::get<1>(v)) / double(std::get<0>(v)));
                 want.push_back({std::to_string(k), std::to_string(std::get<0>(v)), std::to_string(std::get<1>(v)), avg});
             }
             expectEq(query(e, "SELECT c0, count(*), sum(c1), avg(c1)" + from + " GROUP BY c0"), want, "fast path");
@@ -136,8 +146,7 @@ int main() {
             }
             Rows want;
             for (auto& [tag, a] : ref) {
-                char dsum[64];
-                std::snprintf(dsum, sizeof(dsum), "%.15g", a.dSum);
+                const std::string dsum = shortest(a.dSum);
                 want.push_back({tag, std::to_string(a.n), i128(a.bigSum), std::to_string(a.bigMin),
                                 std::to_string(a.bigMax), dsum, std::to_string(a.valMin)});
             }

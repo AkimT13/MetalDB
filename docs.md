@@ -132,8 +132,8 @@ Supported query shape:
   A single UINT32 key with only `COUNT` / `SUM` / `AVG` over UINT32 columns and no
   `WHERE` takes the GPU group-by path; everything else is CPU hash aggregation.
 - `SELECT DISTINCT cA [, cB ...]` (and `SELECT DISTINCT *`)
-- integer `SUM` is exact (128-bit accumulator); `DOUBLE` values print with 15
-  significant digits, `FLOAT` with 7
+- integer `SUM` is exact (128-bit accumulator); `DOUBLE` / `FLOAT` values print as the
+  shortest decimal that round-trips exactly (like PostgreSQL 12+: `19.99`, `0.30000000000000004`)
 - optional `ORDER BY key [ASC|DESC] [, ...]` where `key` is a selected column, a selected
   aggregate (`count(*)`, `sum(c1)`, ...) or a 1-based output position
 - optional `LIMIT n [OFFSET m]`
@@ -155,7 +155,8 @@ Write / catalog statements:
   record rejects the import with its record number and leaves the table unchanged.
 - `COPY '/tmp/demo' TO '/path/out.csv' [WITH HEADER]` and
   `COPY (SELECT ...) TO '/path/out.csv'` — CSV export, written to a temp file and
-  renamed into place; floats use round-trip precision so export → import is lossless
+  renamed into place; floats are written as shortest round-trip decimals, so export →
+  import is bit-exact
 - `DESCRIBE '/tmp/demo'` — lists columns and types
 - `EXPLAIN <statement>` — one `plan` column describing each stage: table size and GPU
   availability, every WHERE leaf's access path (GPU vs CPU and why, zone-map range

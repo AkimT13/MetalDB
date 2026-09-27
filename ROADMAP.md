@@ -1,10 +1,10 @@
 # MetalDB — Roadmap
 
-Current state: GPU-accelerated column-store. Supports UINT32 + STRING columns, insert/delete,
-equality/range/compound WHERE (AND/OR), groupby, hash join, persistence, a small one-shot
-mini-SQL CLI query surface, a thin interactive REPL, and a minimal loopback TCP server.
-Single-threaded, with C++, C, and internal Python (`ctypes`) APIs. WAL-backed recovery and
-explicit flush/checkpoint are now in place.
+Current state: GPU-accelerated column store with typed columns (UINT32, INT64, FLOAT, DOUBLE,
+STRING), a mini-SQL dialect (boolean WHERE trees, multi-key GROUP BY, DISTINCT, ORDER BY /
+LIMIT, INSERT / UPDATE / DELETE, COPY, EXPLAIN), atomic WAL-backed statements, a concurrent
+line-protocol server and a PostgreSQL wire-protocol server, operations tooling (verify / stats
+/ backup / restore / compact), and C++, C, and Python APIs. See README.md for an overview.
 
 ---
 
