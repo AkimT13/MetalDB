@@ -71,6 +71,7 @@ public:
     template <typename Fn>
     void rowIndexForEachLive(Fn fn) { rowIndex_.forEachLive(fn); }
     size_t numColumns() const { return cols_.size(); }
+    size_t rowCount() const { return rowIndex_.liveRows(); }
 
     static std::vector<uint32_t> intersectRowIDs(const std::vector<uint32_t>& lhs,
                                                  const std::vector<uint32_t>& rhs);

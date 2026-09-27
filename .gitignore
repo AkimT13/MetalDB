@@ -11,10 +11,10 @@ a.out
 main
 test
 src/test_*
-src/tests/test_*
-src/tests/bench_*
-src/tests/debug*
 src/mdb
+src/libmdb.a
+src/libmdb.dylib
+src/build-cpu/
 
 # Debug symbol bundles
 *.dSYM/
@@ -22,6 +22,8 @@ src/mdb
 # Database data files produced by tests
 *.mdb
 *.mdb.idx
+*.mdb.wal
+*.str
 
 # macOS
 .DS_Store

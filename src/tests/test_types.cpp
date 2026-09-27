@@ -14,7 +14,7 @@ int main() {
         e.insertTyped("typed_tbl", {
             ColValue(uint32_t(i)),
             ColValue(float(i) * 0.5f),
-            ColValue(int64_t(i) * 1000LL)
+            ColValue(static_cast<int64_t>(i) * int64_t(1000))
         });
     }
 

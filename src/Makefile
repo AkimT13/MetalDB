@@ -1,6 +1,6 @@
 CXX      := clang++
 CC       := clang
-CXXFLAGS := -std=c++17 -arch arm64 -I/usr/local/share/metal-cpp -g -MMD -MP
+CXXFLAGS := -std=c++17 -arch arm64 -I/usr/local/share/metal-cpp -I../metal-cpp -g -MMD -MP
 LDFLAGS  := -framework Metal -framework Foundation
 
 # Metal shader compilation
@@ -142,7 +142,7 @@ fast: $(TESTS)
 	@if [ -z "$(TEST)" ]; then echo "Usage: make fast TEST=<binary>"; exit 1; fi
 	./$(TEST)
 
-clean:
+clean: cpu-clean
 	rm -f $(OBJS) $(DEPS) $(TESTS) mdb mdb.o libmdb.a libmdb.dylib
 	rm -f $(METALLIB_SRCS) $(METAL_SRCS:.metal=.air)
 	rm -f /tmp/table_* /tmp/demo.mdb /tmp/demo.mdb.idx /tmp/demo.mdb.wal *.mdb *.mdb.idx *.wal *.str
@@ -150,6 +150,56 @@ clean:
 	rm -f /tmp/py_*.mdb /tmp/py_*.mdb.idx /tmp/py_*.mdb.wal /tmp/py_*.str
 	rm -f /tmp/sql_*.mdb /tmp/sql_*.mdb.idx /tmp/sql_*.mdb.wal /tmp/sql_*.str
 	rm -f /tmp/wal_*.mdb /tmp/wal_*.mdb.idx /tmp/wal_*.str /tmp/wal_*.wal
+
+# ---- Portable CPU-only build ----------------------------------------------------
+# Builds the engine without Metal (gpu_cpu_stub.cpp replaces the *.mm sources) so it
+# compiles and tests on Linux, CI runners, and Macs without the Metal toolchain.
+# Every hybrid path takes its CPU branch. Output goes to build-cpu/.
+#
+#   make cpu        # build CLI + CPU test suite
+#   make cpu-run    # build and run the CPU test suite
+CPU_DIR      := build-cpu
+CPU_CXX      ?= c++
+CPU_CC       ?= cc
+CPU_CXXFLAGS := -std=c++17 -O1 -g -Wall -I. -MMD -MP
+CPU_CORE     := MasterPage ColumnFile RowIndex Table Engine GroupBy Join MiniSQL QuerySession \
+                Server Wal mdb_c gpu_cpu_stub
+CPU_OBJS     := $(addprefix $(CPU_DIR)/,$(addsuffix .o,$(CPU_CORE)))
+CPU_TESTS    := test_scan_hybrid test_persist_pages test_where_range test_engine test_groupby \
+                test_join test_types test_string_gpu test_compound_where test_mini_sql \
+                test_server test_wal test_multipage test_persistence test_reuse test_scan_sum \
+                test_table test_table_persist test_c_api
+CPU_BINS     := $(addprefix $(CPU_DIR)/,$(CPU_TESTS)) $(CPU_DIR)/mdb
+
+$(CPU_DIR):
+	mkdir -p $(CPU_DIR)
+
+$(CPU_DIR)/%.o: %.cpp | $(CPU_DIR)
+	$(CPU_CXX) $(CPU_CXXFLAGS) -c $< -o $@
+
+$(CPU_DIR)/mdb: $(CPU_OBJS) $(CPU_DIR)/mdb.o
+	$(CPU_CXX) $^ -o $@ -lpthread
+
+$(CPU_DIR)/test_c_api: $(CPU_OBJS) tests/test_c_api.c | $(CPU_DIR)
+	$(CPU_CC) -std=c11 -g -I. -c tests/test_c_api.c -o $(CPU_DIR)/test_c_api.o
+	$(CPU_CXX) $(CPU_OBJS) $(CPU_DIR)/test_c_api.o -o $@ -lpthread
+
+$(CPU_DIR)/test_%: tests/test_%.cpp $(CPU_OBJS) | $(CPU_DIR)
+	$(CPU_CXX) $(CPU_CXXFLAGS) $< $(CPU_OBJS) -o $@ -lpthread
+
+.PHONY: cpu cpu-run cpu-clean
+cpu: $(CPU_BINS)
+
+# Tests run from inside build-cpu/ because some of them invoke ./mdb.
+cpu-run: cpu
+	@set -e; cd $(CPU_DIR); for t in $(CPU_TESTS); do \
+	    echo "== $$t"; ./$$t; \
+	done; echo "CPU suite: all $(words $(CPU_TESTS)) tests passed"
+
+cpu-clean:
+	rm -rf $(CPU_DIR)
+
+-include $(wildcard $(CPU_DIR)/*.d)
 
 # Include dependency files (safe if missing)
 -include $(DEPS)
