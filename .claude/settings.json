@@ -1,0 +1,29 @@
+{
+  "attribution": {
+    "commit": ""
+  },
+  "permissions": {
+    "allow": [
+      "Bash(make test_engine:*)",
+      "Bash(./test_engine:*)",
+      "Bash(make test_groupby:*)",
+      "Bash(./test_groupby:*)",
+      "Bash(make test_types:*)",
+      "Bash(./test_types:*)",
+      "Bash(make run:*)",
+      "Bash(git rebase:*)",
+      "Bash(git:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push origin --delete authorship-rewrite)",
+      "Bash(./tests/debug_gb:*)",
+      "Bash(make:*)",
+      "Bash(ls:*)",
+      "Bash(xcodebuild:*)",
+      "Bash(./test_gpu_scan_equals:*)",
+      "Bash(lldb:*)",
+      "Bash(clang++:*)",
+      "Bash(grep:*)",
+      "Bash(./test_c_api:*)"
+    ]
+  }
+}
