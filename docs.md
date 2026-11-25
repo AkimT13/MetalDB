@@ -71,9 +71,9 @@ conn.commit()
 - errors carry SQLSTATEs (`42P01` undefined table, `42703` undefined column,
   `42601` syntax, `22003` out of range, `42501` sandbox violation, `28P01` bad password)
 - a Query message may hold several `;`-separated statements; an error stops the rest
-- `BEGIN` / `COMMIT` / `ROLLBACK` / `SET` / `RESET` / `DISCARD` are accepted as no-ops for
-  driver compatibility — every statement already autocommits atomically, and `ROLLBACK`
-  sends a NOTICE saying nothing was undone. `SELECT <integer>` answers health checks.
+- `BEGIN` / `COMMIT` / `ROLLBACK` run real transactions (see Transactions above), and
+  ReadyForQuery reports idle / in-transaction / failed status, as drivers expect.
+  `SET` / `RESET` / `DISCARD` are accepted as no-ops; `SELECT <integer>` answers health checks.
 - extended query protocol: prepared statements (named / unnamed), `$n` parameters in
   text or binary (int2/4/8, float4/8, bool, text), text or binary results, Describe
   (ParameterDescription + RowDescription / NoData), row-limited Execute with
@@ -182,6 +182,24 @@ Write / catalog statements:
 - `INSERT` / `DELETE` return a single `rows_affected` column; `CREATE TABLE` returns `created`
 - writes go through the table WAL; use `mdb flush <table>` for an explicit durable checkpoint
 - string literals escape a single quote as `''`
+
+Transactions:
+- `BEGIN` / `START TRANSACTION` … `COMMIT` / `END`, and `ROLLBACK` / `ABORT`, in the REPL,
+  both servers, the C API (`mdb_query`), and Python (`Engine.transaction()` or `query("BEGIN")`)
+- outside a transaction every statement autocommits atomically, as before
+- inside one, writes are buffered per session and nothing reaches the table files or WAL
+  until `COMMIT`. Statements in the transaction see its own pending changes (WHERE, joins of
+  committed and pending rows, GROUP BY, ORDER BY, COPY TO, EXPLAIN). `ROLLBACK` discards them.
+- `COMMIT` on one table is a single atomic WAL batch. On several tables, the whole change set
+  is first written to a commit journal (`<data-dir>/.mdb_txn_journal`), so a crash mid-commit
+  is rolled forward the next time the engine opens a table
+- isolation is READ COMMITTED: readers never block and only see committed data. A transaction
+  takes a table-level write lock the first time it writes a table and holds it to the end;
+  other writers wait up to the lock timeout (10 s) and then fail with
+  `could not obtain lock` (SQLSTATE `55P03`)
+- after an error inside a transaction, every statement except `COMMIT` / `ROLLBACK` fails with
+  `current transaction is aborted` (SQLSTATE `25P02`); `COMMIT` then reports `ROLLBACK`
+- not supported: savepoints, and transactional DDL (`CREATE TABLE` takes effect immediately)
 
 Parameters and names:
 - `$1`, `$2`, ... placeholders bind values supplied separately (C++ `executeMiniSQL(engine,

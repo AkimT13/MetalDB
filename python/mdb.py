@@ -21,6 +21,7 @@ provide external locking.
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import pathlib
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -663,6 +664,22 @@ class Engine:
         return out.value
 
     # ── SQL ──────────────────────────────────────────────────────────────────
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """``with engine.transaction(): ...`` — COMMIT on success, ROLLBACK on error.
+
+        Statements run through query() inside the block see each other's changes;
+        nothing is visible to other connections (or written to disk) until COMMIT.
+        """
+        self.query("BEGIN")
+        try:
+            yield self
+        except BaseException:
+            self.query("ROLLBACK")
+            raise
+        else:
+            self.query("COMMIT")
 
     def query(self, sql: str) -> QueryResult:
         """Runs one mini-SQL statement and returns its typed result.

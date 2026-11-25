@@ -1,6 +1,7 @@
 #include "Engine.hpp"
 #include "MiniSQL.hpp"
 #include "QuerySession.hpp"
+#include "Session.hpp"
 #include "Server.hpp"
 #include "Table.hpp"
 #include "TableTools.hpp"
@@ -98,16 +99,23 @@ static bool findStatementTerminator(const std::string& input, size_t& pos) {
 
 static int runRepl() {
     Engine engine;
+    Session session(engine);
     std::string pending;
     std::string line;
     bool timer = false;
     printReplHelp();
     while (true) {
-        std::printf("%s", pending.empty() ? "mdb> " : "...> ");
+        // psql-style prompt: '*' inside a transaction, '!' when it has failed
+        const char* txn = session.status() == Session::Status::InTransaction ? "*"
+                          : session.status() == Session::Status::Failed       ? "!"
+                                                                              : "";
+        std::printf(pending.empty() ? "mdb%s> " : "...%s> ", txn);
         std::fflush(stdout);
         if (!std::getline(std::cin, line)) {
             if (!pending.empty())
                 std::fprintf(stderr, "repl error: unterminated statement before EOF\n");
+            if (session.status() != Session::Status::Idle)
+                std::fprintf(stderr, "repl: open transaction rolled back\n");
             std::printf("\n");
             return pending.empty() ? 0 : 1;
         }
@@ -138,7 +146,7 @@ static int runRepl() {
             pending = trim(pending);
             if (statement.empty()) continue;
             const auto start = std::chrono::steady_clock::now();
-            (void)executeMiniSQLToStream(engine, statement, "repl");
+            (void)executeMiniSQLToStream(session, statement, "repl");
             if (timer) {
                 const double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - start).count();
@@ -160,7 +168,8 @@ int main(int argc, char** argv) {
             sql += argv[i];
         }
         Engine engine;
-        return executeMiniSQLToStream(engine, sql, "query") ? 0 : 1;
+        Session session(engine);
+        return executeMiniSQLToStream(session, sql, "query") ? 0 : 1;
     }
 
     if (cmd == "repl") {

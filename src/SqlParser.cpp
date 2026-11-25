@@ -223,6 +223,33 @@ public:
 
     ParsedStatement parse() {
         ParsedStatement stmt;
+        // Transaction control. Trailing options (WORK, TRANSACTION, ISOLATION LEVEL ...,
+        // READ WRITE, AND NO CHAIN) are accepted and ignored: MetalDB runs every
+        // transaction at READ COMMITTED with table-level write locks.
+        if (matchKeyword("BEGIN")) {
+            stmt.kind = ParsedStatement::Kind::Begin;
+            skipTransactionOptions();
+            return stmt;
+        }
+        if (matchKeyword("START")) {
+            expectKeyword("TRANSACTION");
+            stmt.kind = ParsedStatement::Kind::Begin;
+            skipTransactionOptions();
+            return stmt;
+        }
+        if (matchKeyword("COMMIT") || matchKeyword("END")) {
+            stmt.kind = ParsedStatement::Kind::Commit;
+            skipTransactionOptions();
+            return stmt;
+        }
+        if (matchKeyword("ROLLBACK") || matchKeyword("ABORT")) {
+            stmt.kind = ParsedStatement::Kind::Rollback;
+            if (isKeyword("TO")) throw std::invalid_argument("savepoints are not supported");
+            skipTransactionOptions();
+            return stmt;
+        }
+        if (isKeyword("SAVEPOINT") || isKeyword("RELEASE")) throw std::invalid_argument("savepoints are not supported");
+
         stmt.explain = matchKeyword("EXPLAIN");
         if (matchKeyword("CREATE")) {
             stmt.kind = ParsedStatement::Kind::CreateTable;
@@ -284,6 +311,12 @@ private:
                 query.offset = parseCount(expectNumeric("OFFSET count"));
         }
         return query;
+    }
+
+    void skipTransactionOptions() {
+        while (peek().kind == TokenKind::Identifier || peek().kind == TokenKind::Comma) ++pos_;
+        if (peek().kind == TokenKind::Semicolon) ++pos_;
+        expect(TokenKind::End, "end of statement");
     }
 
     // CREATE TABLE '<path>' (UINT32, STRING, ...)   or   (c0 UINT32, c1 STRING, ...)

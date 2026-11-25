@@ -25,6 +25,7 @@
 #include "Engine.hpp"
 #include "MiniSQL.hpp"
 #include "QuerySession.hpp"
+#include "Session.hpp"
 
 namespace {
 
@@ -70,13 +71,13 @@ std::string errLine(std::string message) {
     return "ERR\t" + message + "\nEND\n";
 }
 
-std::string executeRequest(Engine& engine, const std::string& request) {
+std::string executeRequest(Session& session, const std::string& request) {
     const std::string sql = trimLine(request);
     if (sql.empty()) return "ERR\tempty request\nEND\n";
     if (sql == ".quit") return "BYE\nEND\n";
 
     try {
-        const std::string body = formatMiniSQLResult(executeMiniSQL(engine, sql));
+        const std::string body = formatMiniSQLResult(session.execute(sql));
         return "OK\n" + body + "END\n";
     } catch (const std::exception& ex) {
         return errLine(ex.what());
@@ -143,6 +144,7 @@ SessionIO::Status SessionIO::readSome(std::string& buf) {
 bool SessionIO::send(const std::string& bytes) { return sendAll(fd_, bytes); }
 
 void handleLineSession(SessionIO& io, Engine& engine, const ServerOptions& opts) {
+    Session session(engine);  // an open transaction is rolled back when the client disconnects
     std::string buffered;
     while (true) {
         const auto status = io.readSome(buffered);
@@ -156,7 +158,7 @@ void handleLineSession(SessionIO& io, Engine& engine, const ServerOptions& opts)
         while ((newlinePos = buffered.find('\n')) != std::string::npos) {
             std::string line = buffered.substr(0, newlinePos);
             buffered.erase(0, newlinePos + 1);
-            if (!io.send(executeRequest(engine, line))) return;
+            if (!io.send(executeRequest(session, line))) return;
             if (trimLine(line) == ".quit") return;
         }
         if (buffered.size() > opts.maxRequestBytes) {

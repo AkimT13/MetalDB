@@ -23,9 +23,10 @@ $ psql -h 127.0.0.1 -p 5433 -c "SELECT c1, count(*), avg(c2) FROM 'orders' WHERE
   unchanged, including prepared statements with binary parameters and results, and
   server-side cursors. Columns have typed OIDs, errors carry SQLSTATE codes, and psql's
   `\dt` / `\d table` and `information_schema` work.
-- **Durability**: a redo-only write-ahead log with checksummed records. Every statement is
-  one WAL transaction, so a crash never leaves a half-applied `INSERT`, `UPDATE`, or
-  `DELETE`. Synchronous commit is optional, and explicit checkpoints are available.
+- **Transactions and durability**: real `BEGIN` / `COMMIT` / `ROLLBACK` (READ COMMITTED,
+  table-level write locks, multi-table atomic commits with crash recovery) on top of a
+  redo-only, checksummed write-ahead log. A crash never leaves a half-applied statement or
+  transaction. Synchronous commit is optional.
 - **Concurrent server**: one thread per connection over a shared engine, with per-table
   statement locks, connection limits, idle timeouts, a data-directory sandbox, and
   graceful shutdown that checkpoints every table. Tested under ThreadSanitizer.
@@ -165,7 +166,7 @@ mdb compact /tmp/orders
   8.9M rows for a 6-column table with 4 KiB pages; larger page sizes raise it. Each
   STRING column's heap is capped at 4 GiB. Hitting either limit raises an error before
   anything is written.
-- There are no multi-statement transactions and no NULLs. Joins are available through the
+- There are no savepoints and no NULLs. Joins are available through the
   C++ and C APIs but not in SQL.
 - The PostgreSQL server has no TLS, SCRAM auth, or `COPY ... STDIN`.
 - GPU kernels operate on `UINT32` (and string equality). Other types run on the CPU.

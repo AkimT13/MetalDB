@@ -587,11 +587,50 @@ kernel (`gpu_groupby.metal`) and the checked GPU sum path will be compiled and r
 
 ---
 
+### Transactions (complete)
+
+`BEGIN` / `COMMIT` / `ROLLBACK` used to be accepted as no-ops (each statement committed on its
+own and `ROLLBACK` undid nothing) — a correctness hazard for drivers like psycopg2 and JDBC
+that wrap everything in a transaction. They are now real:
+
+- `Session` (`Session.cpp`) owns a connection's transaction. Writes inside a transaction are
+  buffered as per-table `TableChanges` (deleted committed row IDs + pending rows with virtual
+  row IDs); nothing reaches the table files or WAL before `COMMIT`, which the redo-only WAL
+  requires. `ROLLBACK`, a failed `COMMIT`, or a disconnect discards the buffer.
+- The executor merges pending changes into every read through a small `TxnHook` interface:
+  WHERE results (committed matches minus pending deletes, plus pending rows matched by the new
+  row-wise `rowMatches`), cell fetches, UPDATE / DELETE targets, aggregates, GROUP BY (the GPU
+  fast path is skipped while a transaction has pending rows), COPY TO, and EXPLAIN.
+- `COMMIT`: one table → one atomic WAL batch; several tables → `Engine::commitTables` writes the
+  whole change set to a checksummed commit journal first, then applies each table, then deletes
+  the journal. The next table access after a crash replays it (idempotently: a table either
+  already has the rows or is exactly where the commit left it); torn journals are discarded.
+- READ COMMITTED isolation with table-level write locks (`Engine::acquireWriteLock`): readers
+  never block; writers wait up to a timeout and then fail (`55P03`). Failed-transaction state
+  as in PostgreSQL (`25P02`; `COMMIT` of a failed transaction reports `ROLLBACK`).
+- Wired into the REPL (prompt shows `mdb*>` / `mdb!>`), the line server, `pgserve` (real
+  ReadyForQuery `T` / `E` / `I` status), the C API, and Python (`Engine.transaction()`).
+
+Bugs found along the way: replay taking a table mutex its caller already held (self-deadlock,
+caught by the new test), and a failed transaction reporting a syntax error instead of the
+aborted state.
+
+Coverage: `test_transactions` — isolation, rollback across reopen, read-your-writes through
+every statement kind, failed state, lock timeouts / non-blocking readers / a writer that waits
+for a commit, atomic two-table transfer, crash-recovery via forked children dying before and
+after the first table is applied, torn-journal discard; also clean under ThreadSanitizer.
+`test_pgwire` covers the protocol status bytes; `python/test_pg_clients.py` checks psycopg2
+commit / rollback visibility across connections; `python/test_mdb.py` the Python helper.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Steps
 
-- Real multi-statement transactions (the WAL already groups operations by transaction ID)
+- Joins in SQL (the C++ hash join exists)
+- NULL support (per-page null bitmap)
+- TLS + SCRAM authentication for `pgserve`
 
 ### GPU Group By Performance
 

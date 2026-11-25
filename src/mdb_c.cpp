@@ -18,6 +18,7 @@
 
 #include "Engine.hpp"
 #include "MiniSQL.hpp"
+#include "Session.hpp"
 #include "Predicate.hpp"
 #include "ValueTypes.hpp"
 
@@ -38,6 +39,7 @@ static_assert((int)MDB_PRED_EQ_STRING == (int)Predicate::Kind::EQ_STRING,
 // ── Engine wrapper ─────────────────────────────────────────────────────────────
 struct MdbEngine {
     Engine      engine;
+    Session     session{engine};  // mdb_query runs here, so BEGIN / COMMIT span calls
     std::string lastError;
     std::string strScratch;  // backing store for MdbValue.str in mdb_fetch_row
 };
@@ -345,7 +347,7 @@ MdbQueryResult* mdb_query(MdbEngine* e, const char* sql) {
     if (!e) return nullptr;
     if (!sql) { e->lastError = "sql must not be NULL"; return nullptr; }
     try {
-        auto* r = new MdbQueryResult{executeMiniSQL(e->engine, sql)};
+        auto* r = new MdbQueryResult{e->session.execute(sql)};
         clearLastError(e);
         return r;
     } catch (const std::bad_alloc&)     { e->lastError = "out of memory"; return nullptr; }

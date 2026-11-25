@@ -295,6 +295,38 @@ def test_sql_query():
         except MdbError:
             pass
 
+def test_transactions():
+    import os as _os
+    for ext in (".mdb", ".mdb.idx", ".mdb.wal"):
+        try:
+            _os.remove("/tmp/py_txn" + ext)
+        except FileNotFoundError:
+            pass
+    with Engine() as e:
+        e.query("CREATE TABLE '/tmp/py_txn' (UINT32)")
+        with e.transaction():
+            e.query("INSERT INTO '/tmp/py_txn' VALUES (1), (2)")
+            check_eq(e.query("SELECT count(*) FROM '/tmp/py_txn'").rows, [(2,)])
+        check_eq(e.query("SELECT count(*) FROM '/tmp/py_txn'").rows, [(2,)])
+        try:
+            with e.transaction():
+                e.query("DELETE FROM '/tmp/py_txn'")
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        check_eq(e.query("SELECT count(*) FROM '/tmp/py_txn'").rows, [(2,)])  # rolled back
+        e.query("BEGIN")
+        try:
+            e.query("SELECT * FROM '/tmp/py_txn_missing'")
+        except MdbError:
+            pass
+        try:
+            e.query("SELECT 1 FROM '/tmp/py_txn'")
+            check(False, "statement in failed transaction should raise")
+        except MdbError as ex:
+            check("aborted" in str(ex))
+        e.query("ROLLBACK")
+
 def test_sum64():
     with Engine() as e:
         e.create_table("/tmp/py_sum64", [UINT32])
@@ -323,6 +355,7 @@ if __name__ == "__main__":
     test_closed_engine_errors()
     test_schema_not_registered()
     test_sql_query()
+    test_transactions()
     test_sum64()
 
     if _failed:

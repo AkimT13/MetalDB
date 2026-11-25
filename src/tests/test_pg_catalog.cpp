@@ -136,7 +136,7 @@ int main() {
     assert(ask(e, "SELECT current_user").rows[0][0] == "alice");
     r = ask(e, "SHOW server_version_num");
     assert(r.headers[0] == "server_version_num" && r.rows[0][0] == "140000");
-    assert(ask(e, "SHOW TRANSACTION ISOLATION LEVEL").rows[0][0] == "serializable");
+    assert(ask(e, "SHOW TRANSACTION ISOLATION LEVEL").rows[0][0] == "read committed");
 
     // Driver type lookups and unknown catalog relations: shaped, sensible.
     r = ask(e, "SELECT t.typname FROM pg_catalog.pg_type t WHERE t.oid = '701'");

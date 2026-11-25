@@ -10,7 +10,11 @@
 // OIDs derived from MiniSQLResult::types, CommandComplete tags, SQLSTATE-coded
 // ErrorResponse, EmptyQueryResponse, Terminate.
 //
-// Compatibility shims: BEGIN / START TRANSACTION / COMMIT / END / ROLLBACK / SET /
+// Transactions: BEGIN / COMMIT / ROLLBACK run real transactions through Session
+// (READ COMMITTED, table-level write locks); ReadyForQuery reports idle / in
+// transaction / failed, and statements in a failed transaction get 25P02.
+//
+// Compatibility shims: SET /
 // DISCARD / RESET are accepted as no-ops (every MetalDB statement is already
 // atomic and durable on its own; ROLLBACK emits a NOTICE saying nothing was undone),
 // and `SELECT <integer>` (connection-pool health checks) answers without a table.
@@ -31,6 +35,7 @@
 #include "Engine.hpp"
 #include "MiniSQL.hpp"
 #include "PgCatalog.hpp"
+#include "Session.hpp"
 #include "SqlParser.hpp"
 #include "Server.hpp"
 
@@ -103,7 +108,7 @@ std::string notice(const std::string& message) {
         .cstr(message).byte('\0').str();
 }
 
-std::string readyForQuery() { return Msg('Z').byte('I').str(); }
+std::string readyForQuery(char status = 'I') { return Msg('Z').byte(status).str(); }
 
 std::string commandComplete(const std::string& tag) { return Msg('C').cstr(tag).str(); }
 
@@ -260,6 +265,9 @@ const char* sqlStateFor(const std::string& m, bool userError) {
         m.find("must appear in") != std::string::npos) return "42703";         // undefined_column
     if (m.rfind("expected", 0) == 0 || m.rfind("unexpected", 0) == 0 || m.rfind("unterminated", 0) == 0 ||
         m.rfind("unknown", 0) == 0) return "42601";                           // syntax_error
+    if (m.find("transaction is aborted") != std::string::npos) return "25P02";  // in_failed_sql_transaction
+    if (m.find("could not obtain lock") != std::string::npos) return "55P03";   // lock_not_available
+    if (m.find("savepoints") != std::string::npos) return "0A000";             // feature_not_supported
     if (m.find("parameter") != std::string::npos) return "08P01";              // protocol_violation
     if (m.find("range") != std::string::npos) return "22003";                  // numeric_value_out_of_range
     if (m.find("must be relative") != std::string::npos ||
@@ -291,14 +299,7 @@ bool allDigits(const std::string& s) {
 bool runSpecial(const std::string& stmt, Outcome& out) {
     const auto w = words(stmt, 3);
     const std::string first = w.empty() ? "" : w[0];
-    if (first == "BEGIN" || (first == "START" && w.size() > 1 && w[1] == "TRANSACTION")) {
-        out.tag = "BEGIN";
-    } else if (first == "COMMIT" || first == "END") {
-        out.tag = "COMMIT";
-    } else if (first == "ROLLBACK" || first == "ABORT") {
-        out.notices.push_back("MetalDB statements autocommit; ROLLBACK did not undo anything");
-        out.tag = "ROLLBACK";
-    } else if (first == "SET" || first == "RESET" || first == "DISCARD") {
+    if (first == "SET" || first == "RESET" || first == "DISCARD") {
         out.tag = first;
     } else if (first == "SELECT" && w.size() == 2 && allDigits(w[1])) {  // SELECT <integer>
         out.returnsRows = true;
@@ -322,8 +323,19 @@ struct Cursor {
 };
 
 struct SessionState {
+    explicit SessionState(Engine& engine) : sql(engine) {}
+    Session sql;  // transaction state + statement execution
     std::map<std::string, Cursor> cursors;
     std::string user = "metaldb";
+
+    // ReadyForQuery transaction status: idle, in a transaction block, or failed.
+    char txnStatus() const {
+        switch (sql.status()) {
+            case Session::Status::InTransaction: return 'T';
+            case Session::Status::Failed: return 'E';
+            default: return 'I';
+        }
+    }
 };
 
 // Inlines bound parameters as quoted literals (catalog queries only; the SQL
@@ -480,7 +492,13 @@ Outcome runStatement(const std::string& stmt, Engine& engine, const std::vector<
     const auto w = words(stmt, 1);
     const std::string first = w.empty() ? "" : w[0];
     try {
-        MiniSQLResult r = describeOnly ? describeMiniSQL(engine, stmt, params) : executeMiniSQL(engine, stmt, params);
+        MiniSQLResult r = describeOnly ? session.sql.describe(stmt, params) : session.sql.execute(stmt, params);
+        out.notices.insert(out.notices.end(), r.notices.begin(), r.notices.end());
+        if (first == "BEGIN" || first == "START" || first == "COMMIT" || first == "END" || first == "ROLLBACK" ||
+            first == "ABORT") {
+            out.tag = describeOnly ? first : r.rows.at(0).at(0);  // COMMIT of a failed transaction reports ROLLBACK
+            return out;
+        }
         const std::string affected = (r.headers.size() == 1 && r.headers[0] == "rows_affected" && !r.rows.empty())
                                          ? r.rows[0][0]
                                          : "0";
@@ -538,7 +556,7 @@ std::string handleQuery(const std::string& sql, Engine& engine, SessionState& se
         }
     }
     if (!any) out += Msg('I').str();  // EmptyQueryResponse
-    out += readyForQuery();
+    out += readyForQuery(session.txnStatus());
     return out;
 }
 
@@ -668,7 +686,7 @@ public:
                 case 'S':
                     failed_ = false;
                     portals_.erase("");  // end of implicit transaction closes the unnamed portal
-                    return readyForQuery();
+                    return readyForQuery(session_.txnStatus());
             }
             throw PgError("08P01", std::string("unexpected message type '") + type + "'");
         } catch (const PgError& ex) {
@@ -920,7 +938,7 @@ void handlePgSession(SessionIO& io, Engine& engine, const ServerOptions& opts) {
     if (!io.send(hello)) return;
 
     // ── query phase ──────────────────────────────────────────────────────────
-    SessionState session;
+    SessionState session(engine);
     session.user = user;
     ExtendedSession ext(engine, session);
     while (true) {

@@ -404,7 +404,7 @@ bool answer(const std::string& rawSql, Engine& engine, const std::string& user, 
         std::string value = "";
         if (what == "server_version") value = "14.0";
         else if (what == "server_version_num") value = "140000";
-        else if (what == "transaction isolation level" || what == "transaction_isolation") value = "serializable";
+        else if (what == "transaction isolation level" || what == "transaction_isolation") value = "read committed";
         else if (what == "standard_conforming_strings") value = "on";
         else if (what == "client_encoding" || what == "server_encoding") value = "UTF8";
         else if (what == "timezone") value = "UTC";

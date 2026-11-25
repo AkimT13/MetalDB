@@ -4,6 +4,7 @@
 #include <string>
 
 #include "Engine.hpp"
+#include "Session.hpp"
 #include "MiniSQL.hpp"
 
 std::string formatMiniSQLResult(const MiniSQLResult& result) {
@@ -23,9 +24,11 @@ std::string formatMiniSQLResult(const MiniSQLResult& result) {
     return out;
 }
 
-bool executeMiniSQLToStream(Engine& engine, const std::string& sql, const char* errorPrefix) {
+bool executeMiniSQLToStream(Session& session, const std::string& sql, const char* errorPrefix) {
     try {
-        const std::string rendered = formatMiniSQLResult(executeMiniSQL(engine, sql));
+        const MiniSQLResult result = session.execute(sql);
+        for (const auto& n : result.notices) std::fprintf(stderr, "notice: %s\n", n.c_str());
+        const std::string rendered = formatMiniSQLResult(result);
         std::fwrite(rendered.data(), 1, rendered.size(), stdout);
         return true;
     } catch (const std::exception& ex) {

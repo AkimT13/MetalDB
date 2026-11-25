@@ -2,8 +2,9 @@
 
 #include <string>
 
-class Engine;
+class Session;
 struct MiniSQLResult;
 
 std::string formatMiniSQLResult(const MiniSQLResult& result);
-bool executeMiniSQLToStream(Engine& engine, const std::string& sql, const char* errorPrefix);
+// Runs one statement in `session`, prints the result (and notices) or the error.
+bool executeMiniSQLToStream(Session& session, const std::string& sql, const char* errorPrefix);

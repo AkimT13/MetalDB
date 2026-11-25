@@ -3,6 +3,7 @@
 #include "MiniSQL.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -51,6 +52,49 @@ std::string fmtMs(double ms) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.3f ms", ms);
     return buf;
+}
+
+// ── transaction overlay ──────────────────────────────────────────────────────
+// For a statement inside a transaction: g_txn is the transaction, g_changes its
+// pending changes for the statement's table (null until it writes that table).
+// Reads merge committed rows with pending ones; writes are buffered.
+thread_local TxnHook* g_txn = nullptr;
+thread_local TableChanges* g_changes = nullptr;
+thread_local std::string g_tableName;
+
+bool isPending(uint32_t rowID) { return g_changes && rowID >= g_changes->virtualBase; }
+
+std::optional<ColValue> cellOf(Table& table, uint32_t rowID, uint16_t col) {
+    if (isPending(rowID)) {
+        const size_t i = rowID - g_changes->virtualBase;
+        if (i >= g_changes->inserted.size() || !g_changes->insertedLive[i]) return std::nullopt;
+        return g_changes->inserted[i][col];
+    }
+    return table.fetchTypedValue(rowID, col);
+}
+
+// Writes one statement's effect: applied atomically now (autocommit), or buffered
+// into the transaction's pending changes.
+void applyWrite(Table& table, const std::vector<uint32_t>& deletes, std::vector<std::vector<ColValue>> inserts) {
+    if (!g_txn) {
+        table.applyAtomic(deletes, inserts);
+        return;
+    }
+    for (const auto& row : inserts) table.validateRow(row);
+    TableChanges& ch = g_txn->changesForWrite(g_tableName, table);
+    g_changes = &ch;
+    for (uint32_t id : deletes) {
+        if (id >= ch.virtualBase) {
+            const size_t i = id - ch.virtualBase;
+            if (i < ch.insertedLive.size()) ch.insertedLive[i] = false;
+        } else if (table.isLive(id)) {
+            ch.deletedBase.insert(id);
+        }
+    }
+    for (auto& row : inserts) {
+        ch.inserted.push_back(std::move(row));
+        ch.insertedLive.push_back(true);
+    }
 }
 
 // ── value formatting ─────────────────────────────────────────────────────────
@@ -240,12 +284,32 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
 
 // ── SELECT execution ─────────────────────────────────────────────────────────
 
+// Matching row IDs, sorted: committed matches minus rows this transaction deleted,
+// followed by matching pending rows (whose virtual IDs sort after every committed ID).
+std::vector<uint32_t> mergePending(std::vector<uint32_t> ids, const WhereExpr* where) {
+    if (!g_changes) return ids;
+    if (!g_changes->deletedBase.empty())
+        ids.erase(std::remove_if(ids.begin(), ids.end(),
+                                 [](uint32_t id) { return g_changes->deletedBase.count(id) > 0; }),
+                  ids.end());
+    size_t pending = 0;
+    for (size_t i = 0; i < g_changes->inserted.size(); ++i) {
+        if (!g_changes->insertedLive[i]) continue;
+        if (where && !rowMatches(*where, g_changes->inserted[i])) continue;
+        ids.push_back(g_changes->virtualBase + static_cast<uint32_t>(i));
+        ++pending;
+    }
+    trace("Transaction: " + std::to_string(g_changes->deletedBase.size()) + " pending deletes hidden, " +
+          std::to_string(pending) + " pending rows matched");
+    return ids;
+}
+
 std::vector<uint32_t> executeWhere(Table& table, const ParsedQuery& query) {
     const auto start = std::chrono::steady_clock::now();
     if (!query.where) {
         auto ids = allLiveRowIDs(table);
         trace("Filter: none (all " + std::to_string(ids.size()) + " live rows)");
-        return ids;
+        return mergePending(std::move(ids), nullptr);
     }
     std::vector<std::string> leaves;
     auto ids = evaluateWhere(table, *query.where, g_trace ? &leaves : nullptr);
@@ -254,7 +318,7 @@ std::vector<uint32_t> executeWhere(Table& table, const ParsedQuery& query) {
         for (const auto& leaf : leaves) trace("  -> " + leaf);
         trace("  matched " + std::to_string(ids.size()) + " rows in " + fmtMs(msSince(start)));
     }
-    return ids;
+    return mergePending(std::move(ids), query.where.get());
 }
 
 MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
@@ -289,7 +353,7 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
         outRow.reserve(cols.size());
         bool ok = true;
         for (uint16_t c : cols) {
-            auto v = table.fetchTypedValue(rowIDs[i], c);
+            auto v = cellOf(table, rowIDs[i], c);
             if (!v) {
                 ok = false;
                 break;
@@ -312,7 +376,7 @@ MiniSQLResult executeScalarAggregateQuery(Table& table, const ParsedQuery& query
             state.count = rowIDs.size();
         } else {
             for (uint32_t rowID : rowIDs)
-                if (auto cell = table.fetchTypedValue(rowID, item.column.index)) state.add(*cell);
+                if (auto cell = cellOf(table, rowID, item.column.index)) state.add(*cell);
         }
         result.headers.push_back(item.header());
         result.types.push_back(aggregateType(table, item));
@@ -336,6 +400,7 @@ void setGroupedHeaders(const Table& table, const ParsedQuery& query, MiniSQLResu
 bool tryFastGroupBy(Engine& engine, Table& table, const ParsedQuery& query,
                     const std::vector<ColumnRef>& keys, MiniSQLResult& result) {
     if (keys.size() != 1 || query.where) return false;
+    if (g_changes && g_changes->hasChanges()) return false;  // must see pending rows: generic path
     const uint16_t keyCol = keys[0].index;
     if (table.columnFile(keyCol).colType() != ColType::UINT32) return false;
     for (const auto& item : query.selectItems) {
@@ -407,7 +472,7 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
         encoded.clear();
         bool live = true;
         for (size_t k = 0; k < keys.size() && live; ++k) {
-            auto v = table.fetchTypedValue(rowID, keys[k].index);
+            auto v = cellOf(table, rowID, keys[k].index);
             if (!v) {
                 live = false;
                 break;
@@ -434,7 +499,7 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
             if (!item.isAggregate()) continue;
             if (item.kind == SelectItem::Kind::CountStar) {
                 ++g.aggs[i].count;
-            } else if (auto cell = table.fetchTypedValue(rowID, item.column.index)) {
+            } else if (auto cell = cellOf(table, rowID, item.column.index)) {
                 g.aggs[i].add(*cell);
             }
         }
@@ -517,14 +582,14 @@ MiniSQLResult executeInsert(Engine& engine, const ParsedStatement& stmt) {
     }
 
     // One WAL transaction: a crash mid-statement never leaves a partial INSERT.
-    table.applyAtomic({}, rows);
-    return rowsAffected(rows.size());
+    applyWrite(table, {}, std::move(rows));
+    return rowsAffected(stmt.insertRows.size());
 }
 
 MiniSQLResult executeDelete(Engine& engine, const ParsedStatement& stmt) {
     Table& table = openExistingTable(engine, stmt.query.tableName);
     const auto rowIDs = executeWhere(table, stmt.query);
-    table.applyAtomic(rowIDs, {});
+    applyWrite(table, rowIDs, {});
     return rowsAffected(rowIDs.size());
 }
 
@@ -545,10 +610,10 @@ MiniSQLResult executeUpdate(Engine& engine, const ParsedStatement& stmt) {
     std::vector<std::vector<ColValue>> newRows;
     newRows.reserve(rowIDs.size());
     for (uint32_t rowID : rowIDs) {
-        auto old = table.fetchTypedRow(rowID);
         std::vector<ColValue> row;
-        row.reserve(old.size());
-        for (auto& cell : old) {
+        row.reserve(table.numColumns());
+        for (uint16_t c = 0; c < table.numColumns(); ++c) {
+            auto cell = cellOf(table, rowID, c);
             if (!cell) throw std::runtime_error("row " + std::to_string(rowID) + " vanished during UPDATE");
             row.push_back(std::move(*cell));
         }
@@ -556,8 +621,9 @@ MiniSQLResult executeUpdate(Engine& engine, const ParsedStatement& stmt) {
         newRows.push_back(std::move(row));
     }
 
-    table.applyAtomic(rowIDs, newRows);
-    return rowsAffected(rowIDs.size());
+    const size_t n = rowIDs.size();
+    applyWrite(table, rowIDs, std::move(newRows));
+    return rowsAffected(n);
 }
 
 MiniSQLResult executeDescribe(Engine& engine, const ParsedStatement& stmt) {
@@ -733,9 +799,10 @@ MiniSQLResult executeCopyFrom(Engine& engine, const ParsedStatement& stmt) {
         rows.push_back(std::move(row));
     }
 
-    table.applyAtomic({}, rows);
-    table.flushDurable();
-    return rowsAffected(rows.size());
+    const size_t n = rows.size();
+    applyWrite(table, {}, std::move(rows));
+    if (!g_txn) table.flushDurable();  // inside a transaction the rows are still pending
+    return rowsAffected(n);
 }
 
 // COPY '<table>' TO '<file>' / COPY (SELECT ...) TO '<file>'. Writes to a temp file
@@ -860,15 +927,53 @@ MiniSQLResult describeMiniSQL(Engine& engine, const std::string& sqlText,
     return shape;
 }
 
-MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText, const std::vector<std::string>* params) {
-    const ParsedStatement stmt = sql::parse(sqlText, params);
+bool TableChanges::hasChanges() const {
+    if (!deletedBase.empty()) return true;
+    return std::find(insertedLive.begin(), insertedLive.end(), true) != insertedLive.end();
+}
+
+std::vector<std::vector<ColValue>> TableChanges::liveInserts() const {
+    std::vector<std::vector<ColValue>> rows;
+    for (size_t i = 0; i < inserted.size(); ++i)
+        if (insertedLive[i]) rows.push_back(inserted[i]);
+    return rows;
+}
+
+std::vector<uint32_t> TableChanges::deletedRowIDs() const {
+    std::vector<uint32_t> ids(deletedBase.begin(), deletedBase.end());
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+MiniSQLResult executeParsedStatement(Engine& engine, const ParsedStatement& stmt, TxnHook* txn) {
+    if (stmt.isTransactionControl())
+        throw std::invalid_argument("BEGIN / COMMIT / ROLLBACK need a session (use Session, the REPL, or a server)");
     // Every statement touches exactly one table; serialize statements per table so
     // concurrent sessions (server threads) never share a Table's mutable caches.
     (void)engine.resolveTableBase(stmt.query.tableName);  // sandbox check before locking
     std::lock_guard<std::mutex> tableLock(engine.tableMutex(stmt.query.tableName));
+
+    struct Scope {
+        Scope(TxnHook* t, const std::string& name) {
+            g_txn = t;
+            g_tableName = name;
+            g_changes = t ? t->changesFor(name) : nullptr;
+        }
+        ~Scope() {
+            g_txn = nullptr;
+            g_changes = nullptr;
+            g_tableName.clear();
+        }
+    } scope(txn, stmt.query.tableName);
+
     if (stmt.explain) return executeExplain(engine, stmt);
     switch (stmt.kind) {
-        case ParsedStatement::Kind::CreateTable: return executeCreateTable(engine, stmt);
+        case ParsedStatement::Kind::CreateTable: {
+            auto r = executeCreateTable(engine, stmt);
+            if (txn) r.notices.push_back("CREATE TABLE is not transactional: the table remains even if this "
+                                         "transaction rolls back");
+            return r;
+        }
         case ParsedStatement::Kind::Insert: return executeInsert(engine, stmt);
         case ParsedStatement::Kind::Delete: return executeDelete(engine, stmt);
         case ParsedStatement::Kind::Describe: return executeDescribe(engine, stmt);
@@ -876,6 +981,7 @@ MiniSQLResult executeMiniSQL(Engine& engine, const std::string& sqlText, const s
         case ParsedStatement::Kind::Copy:
             return stmt.copyFrom ? executeCopyFrom(engine, stmt) : executeCopyTo(engine, stmt);
         case ParsedStatement::Kind::Select: break;
+        default: break;
     }
     return executeSelect(engine, stmt.query);
 }

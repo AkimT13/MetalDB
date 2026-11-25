@@ -1,4 +1,7 @@
 #pragma once
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,6 +45,29 @@ public:
     // Checkpoints every open table (WAL folded into base files, fsync).
     void flushAll();
 
+    // ── Transactions (used by Session) ──────────────────────────────────────
+    // Table-level write locks: a writer owns a table until it releases it (an
+    // autocommit statement for one statement, a transaction until COMMIT /
+    // ROLLBACK). Readers never take them: table files only ever hold committed
+    // data, so reads are READ COMMITTED without blocking. Acquiring waits up to
+    // `timeout` and then throws std::invalid_argument ("could not obtain lock").
+    uint64_t newSessionId();
+    void acquireWriteLock(const std::string& table, uint64_t owner, std::chrono::milliseconds timeout);
+    void releaseWriteLock(const std::string& table, uint64_t owner);
+    void releaseWriteLocks(uint64_t owner);
+
+    // Commits one transaction's changes to several tables atomically: the full
+    // change set is written to a commit journal (<data-dir>/.mdb_txn_journal) before
+    // any table is touched, then applied table by table, then the journal is
+    // cleared. If the process dies mid-way, the next Engine use replays the journal.
+    // The caller holds the write lock of every table involved.
+    struct TableCommit {
+        std::string table;
+        std::vector<uint32_t> deletes;
+        std::vector<std::vector<ColValue>> inserts;
+    };
+    void commitTables(const std::vector<TableCommit>& commits);
+
     uint32_t insert(const std::string& name, const std::vector<ValueType>& row);
     uint32_t insertTyped(const std::string& name, const std::vector<ColValue>& row);
     std::vector<uint32_t> whereEq(const std::string& name, uint16_t col, ValueType v);
@@ -72,4 +98,17 @@ private:
     bool syncCommit_ = false;
     std::string dataDir_;
     std::string tablePath(const std::string& name) const;
+
+    std::mutex lockMutex_;
+    std::condition_variable lockCv_;
+    std::unordered_map<std::string, uint64_t> writeLockOwner_;
+    uint64_t nextSessionId_ = 1;
+
+    std::mutex journalMutex_;                  // one multi-table commit at a time
+    std::recursive_mutex recoveryMutex_;       // replay re-enters openTable on the same thread
+    std::atomic<bool> journalChecked_{false};
+    bool recovering_ = false;
+    std::string journalPath() const;
+    void recoverJournal();  // once per data directory, before the first table access
+    void replayJournal();
 };

@@ -115,7 +115,14 @@ struct ParsedStatement {
         Update,
         Describe,
         Copy,
+        Begin,     // BEGIN / START TRANSACTION
+        Commit,    // COMMIT / END
+        Rollback,  // ROLLBACK / ABORT
     };
+
+    bool isTransactionControl() const {
+        return kind == Kind::Begin || kind == Kind::Commit || kind == Kind::Rollback;
+    }
 
     Kind kind = Kind::Select;
     bool explain = false;                       // EXPLAIN <statement>

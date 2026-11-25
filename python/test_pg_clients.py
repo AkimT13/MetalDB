@@ -105,6 +105,24 @@ def run_psycopg2(port):
     cur.execute("SELECT count(*), sum(c0) FROM people WHERE c1 != %s", ("O'Hara",))
     check(cur.fetchone() == (50, 1275), "psycopg2 aggregate")
     conn.commit()
+
+    # psycopg2 runs every statement inside BEGIN (autocommit off): real transactions now.
+    cur.execute("DELETE FROM people WHERE c0 <= %s", (10,))
+    cur.execute("SELECT count(*) FROM people")
+    check(cur.fetchone() == (41,), "psycopg2 sees its uncommitted delete")
+    other = psycopg2.connect(host="127.0.0.1", port=port, user="app", dbname="x")
+    other.autocommit = True
+    ocur = other.cursor()
+    ocur.execute("SELECT count(*) FROM people")
+    check(ocur.fetchone() == (51,), "psycopg2 other connection does not see it")
+    conn.rollback()
+    cur.execute("SELECT count(*) FROM people")
+    check(cur.fetchone() == (51,), "psycopg2 rollback restores rows")
+    cur.execute("UPDATE people SET c1 = %s WHERE c0 = %s", ("renamed", 1))
+    conn.commit()
+    ocur.execute("SELECT c1 FROM people WHERE c0 = 1")
+    check(ocur.fetchone() == ("renamed",), "psycopg2 commit is visible to others")
+    other.close()
     conn.close()
     print("PASS psycopg2")
 

@@ -423,6 +423,48 @@ void validateWhere(const Table& table, const WhereExpr& expr) {
     }
 }
 
+bool rowMatches(const WhereExpr& e, const std::vector<ColValue>& row) {
+    switch (e.kind) {
+        case WhereExpr::Kind::And:
+            for (const auto& c : e.children)
+                if (!rowMatches(*c, row)) return false;
+            return true;
+        case WhereExpr::Kind::Or:
+            for (const auto& c : e.children)
+                if (rowMatches(*c, row)) return true;
+            return false;
+        case WhereExpr::Kind::Not:
+            return !rowMatches(*e.children.front(), row);
+        default:
+            break;
+    }
+    const ColValue& v = row.at(e.column.index);
+    if (v.type == ColType::STRING) {
+        auto cmp = [&](const Token& lit) {
+            const int c = v.str.compare(lit.text);
+            return c < 0 ? -1 : (c > 0 ? 1 : 0);
+        };
+        if (e.kind == WhereExpr::Kind::In) {
+            for (const auto& lit : e.literals)
+                if (cmp(lit) == 0) return true;
+            return false;
+        }
+        if (e.kind == WhereExpr::Kind::Between) return cmp(e.literals[0]) >= 0 && cmp(e.literals[1]) <= 0;
+        return applyOp(e.op, cmp(e.literals[0]));
+    }
+    if (e.kind == WhereExpr::Kind::In) {
+        for (const auto& lit : e.literals)
+            if (compareNumeric(v, parseNumeric(lit)) == 0) return true;
+        return false;
+    }
+    if (e.kind == WhereExpr::Kind::Between) {
+        const int a = compareNumeric(v, parseNumeric(e.literals[0]));
+        const int b = compareNumeric(v, parseNumeric(e.literals[1]));
+        return a != 2 && b != 2 && a >= 0 && b <= 0;
+    }
+    return applyOp(e.op, compareNumeric(v, parseNumeric(e.literals[0])));
+}
+
 std::vector<uint32_t> evaluateWhere(Table& table, const WhereExpr& expr, std::vector<std::string>* trace) {
     validateWhere(table, expr);
     return Evaluator(table, trace).eval(expr);

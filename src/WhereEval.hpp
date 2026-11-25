@@ -29,6 +29,10 @@ void validateWhere(const Table& table, const WhereExpr& expr);
 std::vector<uint32_t> evaluateWhere(Table& table, const WhereExpr& expr,
                                     std::vector<std::string>* trace = nullptr);
 
+// Evaluates `expr` against one in-memory row (a transaction's pending insert).
+// Same comparison semantics as evaluateWhere; `expr` must already be validated.
+bool rowMatches(const WhereExpr& expr, const std::vector<ColValue>& row);
+
 // Renders the expression back to SQL-ish text (EXPLAIN / error messages).
 std::string whereToString(const WhereExpr& expr);
 

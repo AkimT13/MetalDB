@@ -247,8 +247,25 @@ int main() {
         assert(types(r) == "IZ");
         r = simpleQuery(c, "SELECT 1");
         assert(types(r) == "TDCZ" && parseDataRow(r[1])[0] == "1");
-        r = simpleQuery(c, "BEGIN; INSERT INTO '/tmp/pgwire_tbl' VALUES (3, 'c', 0, 0, 0); ROLLBACK");
-        assert(types(r) == "CCNCZ");  // BEGIN, INSERT, NOTICE, ROLLBACK
+        // Real transactions: ReadyForQuery reports T (in block) / E (failed) / I (idle).
+        r = simpleQuery(c, "BEGIN; INSERT INTO '/tmp/pgwire_tbl' VALUES (3, 'c', 0, 0, 0)");
+        assert(types(r) == "CCZ" && r.back().body == "T");
+        r = simpleQuery(c, "SELECT count(*) FROM '/tmp/pgwire_tbl'");
+        assert(parseDataRow(r[1])[0] == "3" && r.back().body == "T");  // sees its own insert
+        r = simpleQuery(c, "ROLLBACK");
+        assert(r[0].body == std::string("ROLLBACK") + '\0' && r.back().body == "I");
+        r = simpleQuery(c, "SELECT count(*) FROM '/tmp/pgwire_tbl'");
+        assert(parseDataRow(r[1])[0] == "2");  // rolled back
+        r = simpleQuery(c, "BEGIN; SELECT * FROM '/tmp/pgwire_missing'");
+        assert(types(r) == "CEZ" && r.back().body == "E");
+        r = simpleQuery(c, "INSERT INTO '/tmp/pgwire_tbl' VALUES (9, 'x', 0, 0, 0)");
+        assert(types(r) == "EZ" && field(r[0], 'C') == "25P02" && r.back().body == "E");
+        r = simpleQuery(c, "COMMIT");  // COMMIT of a failed transaction rolls back
+        assert(r[0].body == std::string("ROLLBACK") + '\0' && r.back().body == "I");
+        r = simpleQuery(c, "BEGIN; INSERT INTO '/tmp/pgwire_tbl' VALUES (3, 'c', 0, 0, 0); COMMIT");
+        assert(types(r) == "CCCZ" && r.back().body == "I");
+        r = simpleQuery(c, "SELECT count(*) FROM '/tmp/pgwire_tbl'");
+        assert(parseDataRow(r[1])[0] == "3");
         r = simpleQuery(c, "SET search_path TO public");
         assert(r[0].body == std::string("SET") + '\0');
 
