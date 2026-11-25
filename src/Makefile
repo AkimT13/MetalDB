@@ -129,6 +129,9 @@ test_pgwire: $(OBJS) tests/test_pgwire.cpp mdb
 test_gpu_groupby: $(OBJS) tests/test_gpu_groupby.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+bench_gpu: $(OBJS) tests/bench_gpu.cpp
+	$(CXX) $(CXXFLAGS) -O2 $^ -o $@ $(LDFLAGS)
+
 test_pg_catalog: $(OBJS) tests/test_pg_catalog.cpp
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_pg_catalog.cpp -o $@ $(LDFLAGS)
 
@@ -146,6 +149,14 @@ test_c_api: libmdb.a tests/test_c_api.c
 .PHONY: test-python
 test-python: libmdb.dylib
 	python3 ../python/test_mdb.py
+
+.PHONY: print-tests mac-check
+print-tests:
+	@echo $(TESTS)
+
+# Full Apple Silicon verification + GPU benchmark → ../mac-check-report.md
+mac-check:
+	../scripts/mac-check.sh
 
 .PHONY: run clean fast
 
@@ -225,6 +236,9 @@ $(CPU_DIR)/libmdb.so: $(CPU_OBJS)
 $(CPU_DIR)/test_c_api: $(CPU_OBJS) tests/test_c_api.c | $(CPU_DIR)
 	$(CPU_CC) -std=c11 -g -I. -c tests/test_c_api.c -o $(CPU_DIR)/test_c_api.o
 	$(CPU_CXX) $(CPU_OBJS) $(CPU_DIR)/test_c_api.o -o $@ -lpthread
+
+$(CPU_DIR)/bench_gpu: tests/bench_gpu.cpp $(CPU_OBJS) | $(CPU_DIR)
+	$(CPU_CXX) $(CPU_CXXFLAGS) -O2 $< $(CPU_OBJS) -o $@ -lpthread
 
 $(CPU_DIR)/test_%: tests/test_%.cpp $(CPU_OBJS) | $(CPU_DIR)
 	$(CPU_CXX) $(CPU_CXXFLAGS) $< $(CPU_OBJS) -o $@ -lpthread

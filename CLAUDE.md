@@ -30,8 +30,10 @@ make cpu-run
 
 When working without a Mac (e.g. cloud sessions), use `make cpu-run` to verify changes.
 GPU paths cannot be exercised there — write GPU tests so they compare the GPU result
-against a CPU reference (they then also pass in the CPU build) and ask the user to run
-`make run` on Apple Silicon.
+against a CPU reference (they then also pass in the CPU build), add them to `TESTS` so
+`make mac-check` picks them up, and ask the user to run `make mac-check` on Apple Silicon.
+It builds the Metal targets, runs every test plus the Python / PostgreSQL client tests and
+the GPU benchmark (`bench_gpu`), and writes `mac-check-report.md` for the user to paste back.
 
 Test binaries are listed in `TESTS` (Metal build) and `CPU_TESTS` (portable build) in `src/Makefile`.
 

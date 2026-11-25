@@ -31,3 +31,7 @@ src/build-cpu/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Mac verification output
+mac-check-report.md
+mac-check-logs/

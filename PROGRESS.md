@@ -567,6 +567,26 @@ probes, nested table paths, and that ordinary SQL is not intercepted.
 
 ---
 
+### Mac Verification Batch + GPU Benchmark (complete; awaiting first run on Apple Silicon)
+
+Work done in cloud sessions can't exercise Metal, so the Mac-only checks are queued as
+one command: `make mac-check` (`scripts/mac-check.sh`). It records the machine (macOS,
+chip, GPU, Xcode), detects a missing Metal toolchain or metal-cpp headers, builds the Metal
+targets, runs every binary in `TESTS` individually (continuing past failures, keeping the
+tail of each failure's output), runs the Python and PostgreSQL-client tests, and runs the
+GPU benchmark, writing everything to `mac-check-report.md` (logs in `mac-check-logs/`).
+
+`bench_gpu` (`src/tests/bench_gpu.cpp`) times every hybrid operation on the CPU path and
+the GPU path (equality scan, range scan, column sum, GROUP BY count / sum, string
+equality) at 10k / 100k / 1M rows (`BENCH_MAX_ROWS` raises it to 4M), reports medians
+and speedups as a Markdown table, and fails if the two paths ever disagree, so it doubles
+as a correctness check at sizes the unit tests don't reach.
+
+**Pending:** first `make mac-check` run. This is the first time the rewritten group-by
+kernel (`gpu_groupby.metal`) and the checked GPU sum path will be compiled and run.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Steps

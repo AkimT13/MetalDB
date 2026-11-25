@@ -82,6 +82,13 @@ make run        # full test suite, including the GPU kernels
 ./src/mdb repl
 ```
 
+To verify everything on a Mac in one go (Metal build, every test, Python and PostgreSQL
+client tests, GPU-vs-CPU benchmark) and get a shareable report:
+
+```bash
+make mac-check   # writes mac-check-report.md
+```
+
 On Linux, in CI, or on a Mac without the Metal toolchain:
 
 ```bash
