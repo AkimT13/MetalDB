@@ -41,13 +41,14 @@ struct Token {
 
 struct ColumnRef {
     uint16_t index = 0;
-    std::string text;  // normalized "cN"
+    std::string text;       // normalized "cN"; "alias.cN" once resolved in a join
+    std::string qualifier;  // table name / alias written before the column ("" if none)
 };
 
 struct SelectItem {
     enum class Kind {
         Column,
-        Star,
+        Star,       // * (or alias.* — column.qualifier holds the alias)
         CountStar,
         Count,   // COUNT(cN)
         Sum,
@@ -68,6 +69,7 @@ struct SelectItem {
 struct WhereExpr {
     enum class Kind {
         Compare,  // column <op> literal
+        ColumnCompare,  // column <op> column (rhs)
         Between,  // column BETWEEN lo AND hi   (literals[0], literals[1])
         In,       // column IN (literals...)
         And,
@@ -79,6 +81,7 @@ struct WhereExpr {
     Kind kind = Kind::Compare;
     Op op = Op::Eq;
     ColumnRef column;
+    ColumnRef rhs;                 // ColumnCompare only
     std::vector<Token> literals;
     std::vector<std::shared_ptr<WhereExpr>> children;
 };
@@ -87,10 +90,20 @@ struct OrderKey {
     std::string header;   // output column header to sort on (e.g. "c1", "count(*)")
     size_t position = 0;  // 1-based output position when ordered by number; 0 otherwise
     bool descending = false;
+    SelectItem item;      // the expression ordered by (when position == 0)
+};
+
+// [INNER] JOIN <table> [[AS] alias] ON l = r [AND l = r]*
+struct JoinClause {
+    std::string tableName;
+    std::string alias;  // defaults to the table name
+    std::vector<std::pair<ColumnRef, ColumnRef>> on;
 };
 
 struct ParsedQuery {
     std::string tableName;
+    std::string alias;                 // FROM table's alias (defaults to the table name)
+    std::vector<JoinClause> joins;     // empty for single-table queries
     std::vector<SelectItem> selectItems;
     bool distinct = false;             // SELECT DISTINCT
     std::shared_ptr<WhereExpr> where;  // null when there is no WHERE clause

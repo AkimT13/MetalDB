@@ -113,7 +113,8 @@ Intentional v1 restrictions:
 
 - synthetic column identifiers only (`c0`, `c1`, ...)
 - mixed `AND` / `OR` in a single `WHERE` is rejected
-- no joins, aliases, `ORDER BY`, `LIMIT`, parentheses, subqueries, or CTEs
+- no joins, aliases, `ORDER BY`, `LIMIT`, parentheses, subqueries, or CTEs (all but
+  subqueries / CTEs were added later)
 - `GROUP BY ... WHERE ...` is rejected for now
 - grouped queries are limited to the existing UINT32 group-by paths
 
@@ -624,11 +625,46 @@ commit / rollback visibility across connections; `python/test_mdb.py` the Python
 
 ---
 
+### SQL Joins (complete)
+
+Joins were only reachable from C++ (`Engine::join`, one UINT32 column each side, committed
+data only). SQL now has them:
+
+- Syntax: `FROM a [AS x] [INNER] JOIN b [AS y] ON x.cN = y.cM [AND ...] [JOIN c ...]`, table
+  aliases (also on single-table queries), and qualified columns `alias.cN` everywhere a
+  column can appear. Unqualified columns resolve when unambiguous; output headers are
+  qualified (`u.c1`, `sum(o.c2)`); `*` and `alias.*` expand in FROM order.
+- Planner (`planJoin` in `MiniSQL.cpp`): resolves every reference to a position in the
+  combined row; splits WHERE into conjuncts and pushes single-table ones into that table's
+  scan (so they keep zone maps and the GPU-capable scans); keeps the rest as a residual
+  filter on joined rows; marks which columns must be materialized.
+- Executor: left-deep CPU hash join over any key types (integers across UINT32 / INT64,
+  floats across FLOAT / DOUBLE with -0 = 0 and NaN unmatched, strings), multi-column keys,
+  self joins; then the existing projection / aggregate / GROUP BY / DISTINCT / ORDER BY /
+  LIMIT code, now written once over a generic row source (`aggregateRows`, `groupRows`).
+- Locks every table of a join in a fixed (address) order; tested with concurrent joins in
+  opposite FROM order plus writers, and clean under ThreadSanitizer.
+- Inside a transaction each table's scan merges that transaction's pending rows.
+- `EXPLAIN` shows per-table scans and filters, build / probe sizes, and the residual filter.
+- Also new: column-to-column comparisons in WHERE (`c0 < c2`, `a.c0 < b.c0`) on one table
+  or across a join, and SQLSTATEs for the new errors (`42702` ambiguous column, `42703`
+  undefined column, `42712` duplicate alias, `42804` type mismatch, `0A000` outer joins).
+- Not supported: outer / cross / natural joins, `USING`, comma FROM lists, non-equality `ON`.
+
+Coverage: `test_sql_join` covers resolution and errors, every result shape over joins,
+multi-key / three-way / self / mixed-type joins, pushdown via EXPLAIN, column compares,
+transactions, COPY, describe, a randomized 6000 x 1500 join checked against nested loops
+with the scans forced onto the GPU path (on a Mac) and the CPU, and the concurrency case.
+`python/test_pg_clients.py` runs a parameterized join through psycopg 3.
+
+---
+
 ## Known Issues / Next Work
 
 ### Next Logical Steps
 
-- Joins in SQL (the C++ hash join exists)
+- GPU hash join (build / probe kernels; today the join step is CPU, only its scans use the GPU)
+- `HAVING`, arithmetic expressions
 - NULL support (per-page null bitmap)
 - TLS + SCRAM authentication for `pgserve`
 

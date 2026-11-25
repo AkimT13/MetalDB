@@ -166,8 +166,7 @@ mdb compact /tmp/orders
   8.9M rows for a 6-column table with 4 KiB pages; larger page sizes raise it. Each
   STRING column's heap is capped at 4 GiB. Hitting either limit raises an error before
   anything is written.
-- There are no savepoints and no NULLs. Joins are available through the
-  C++ and C APIs but not in SQL.
+- There are no savepoints and no NULLs, so joins are inner joins only.
 - The PostgreSQL server has no TLS, SCRAM auth, or `COPY ... STDIN`.
 - GPU kernels operate on `UINT32` (and string equality). Other types run on the CPU.
 

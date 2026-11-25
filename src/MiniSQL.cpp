@@ -177,27 +177,39 @@ struct AggregateState {
 
 bool isIntegral(ColType t) { return t == ColType::UINT32 || t == ColType::INT64; }
 
-ColType aggregateType(const Table& table, const SelectItem& item) {
+std::vector<ColType> columnTypes(const Table& table) {
+    std::vector<ColType> types;
+    types.reserve(table.numColumns());
+    for (uint16_t c = 0; c < table.numColumns(); ++c) types.push_back(table.columnFile(c).colType());
+    return types;
+}
+
+// `input` is the type of the aggregated column (ignored for COUNT(*)).
+ColType aggregateType(ColType input, const SelectItem& item) {
     switch (item.kind) {
         case SelectItem::Kind::CountStar:
         case SelectItem::Kind::Count:
             return ColType::INT64;
         case SelectItem::Kind::Sum:
-            return isIntegral(table.columnFile(item.column.index).colType()) ? ColType::INT64 : ColType::DOUBLE;
+            return isIntegral(input) ? ColType::INT64 : ColType::DOUBLE;
         case SelectItem::Kind::Avg:
             return ColType::DOUBLE;
         default:
-            return table.columnFile(item.column.index).colType();
+            return input;
     }
 }
 
-std::string formatAggregate(const Table& table, const SelectItem& item, const AggregateState& state) {
+ColType inputType(const std::vector<ColType>& types, const SelectItem& item) {
+    return item.kind == SelectItem::Kind::CountStar ? ColType::INT64 : types.at(item.column.index);
+}
+
+std::string formatAggregate(ColType input, const SelectItem& item, const AggregateState& state) {
     switch (item.kind) {
         case SelectItem::Kind::CountStar:
         case SelectItem::Kind::Count:
             return std::to_string(state.count);
         case SelectItem::Kind::Sum:
-            if (isIntegral(table.columnFile(item.column.index).colType())) return formatInt128(state.intSum);
+            if (isIntegral(input)) return formatInt128(state.intSum);
             return formatDouble(static_cast<double>(state.floatSum));
         case SelectItem::Kind::Min:
             return state.hasValue ? formatColValue(state.min) : "";
@@ -220,7 +232,12 @@ void validateColumnRef(const Table& table, uint16_t colIdx) {
         throw std::invalid_argument("column index out of bounds");
 }
 
-void validateQueryShape(const Table& table, const ParsedQuery& query) {
+void validateColumnRef(const std::vector<ColType>& types, uint16_t colIdx) {
+    if (colIdx >= types.size())
+        throw std::invalid_argument("column index out of bounds");
+}
+
+void validateQueryShape(const std::vector<ColType>& types, const ParsedQuery& query) {
     bool hasStar = false;
     bool hasColumn = false;
     int aggregateCount = 0;
@@ -232,7 +249,7 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
                 break;
             case SelectItem::Kind::Column:
                 hasColumn = true;
-                validateColumnRef(table, item.column.index);
+                validateColumnRef(types, item.column.index);
                 break;
             case SelectItem::Kind::CountStar:
                 ++aggregateCount;
@@ -241,13 +258,13 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
             case SelectItem::Kind::Min:
             case SelectItem::Kind::Max:
                 ++aggregateCount;
-                validateColumnRef(table, item.column.index);
+                validateColumnRef(types, item.column.index);
                 break;
             case SelectItem::Kind::Sum:
             case SelectItem::Kind::Avg:
                 ++aggregateCount;
-                validateColumnRef(table, item.column.index);
-                if (table.columnFile(item.column.index).colType() == ColType::STRING)
+                validateColumnRef(types, item.column.index);
+                if (types[item.column.index] == ColType::STRING)
                     throw std::invalid_argument(item.header() + " requires a numeric column");
                 break;
         }
@@ -255,7 +272,7 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
 
     if (hasStar && query.selectItems.size() != 1)
         throw std::invalid_argument("SELECT * cannot be combined with other projections");
-    if (query.where) validateWhere(table, *query.where);
+    if (query.where) validateWhere(types, *query.where);
 
     if (query.distinct) {
         if (aggregateCount > 0 || !query.groupBy.empty())
@@ -265,7 +282,7 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
 
     if (!query.groupBy.empty()) {
         if (hasStar) throw std::invalid_argument("SELECT * with GROUP BY is not supported");
-        for (const auto& key : query.groupBy) validateColumnRef(table, key.index);
+        for (const auto& key : query.groupBy) validateColumnRef(types, key.index);
         for (const auto& item : query.selectItems) {
             if (item.kind != SelectItem::Kind::Column) continue;
             const bool grouped = std::any_of(query.groupBy.begin(), query.groupBy.end(),
@@ -280,6 +297,10 @@ void validateQueryShape(const Table& table, const ParsedQuery& query) {
     if (aggregateCount > 0 && (hasColumn || hasStar))
         throw std::invalid_argument("column " + std::string(hasStar ? "*" : "references") +
                                     " cannot be mixed with aggregates without GROUP BY");
+}
+
+void validateQueryShape(const Table& table, const ParsedQuery& query) {
+    validateQueryShape(columnTypes(table), query);
 }
 
 // ── SELECT execution ─────────────────────────────────────────────────────────
@@ -365,33 +386,46 @@ MiniSQLResult executeProjectionQuery(Table& table, const ParsedQuery& query) {
     return result;
 }
 
-MiniSQLResult executeScalarAggregateQuery(Table& table, const ParsedQuery& query) {
-    const auto rowIDs = executeWhere(table, query);
-    trace("Aggregate: scalar over " + std::to_string(rowIDs.size()) + " rows");
+// Aggregation runs over any row source: `n` rows, cell(i, col) -> std::optional<ColValue>
+// (nullopt for a row that vanished), with column types `types`.
+template <class Cell>
+MiniSQLResult aggregateRows(size_t n, Cell cell, const std::vector<ColType>& types, const ParsedQuery& query) {
+    trace("Aggregate: scalar over " + std::to_string(n) + " rows");
     MiniSQLResult result;
     std::vector<std::string> row;
     for (const auto& item : query.selectItems) {
         AggregateState state;
         if (item.kind == SelectItem::Kind::CountStar) {
-            state.count = rowIDs.size();
+            state.count = n;
         } else {
-            for (uint32_t rowID : rowIDs)
-                if (auto cell = cellOf(table, rowID, item.column.index)) state.add(*cell);
+            for (size_t i = 0; i < n; ++i)
+                if (auto v = cell(i, item.column.index)) state.add(*v);
         }
+        const ColType in = inputType(types, item);
         result.headers.push_back(item.header());
-        result.types.push_back(aggregateType(table, item));
-        row.push_back(formatAggregate(table, item, state));
+        result.types.push_back(aggregateType(in, item));
+        row.push_back(formatAggregate(in, item, state));
     }
     result.rows.push_back(std::move(row));
     return result;
 }
 
-void setGroupedHeaders(const Table& table, const ParsedQuery& query, MiniSQLResult& result) {
+MiniSQLResult executeScalarAggregateQuery(Table& table, const ParsedQuery& query) {
+    const auto rowIDs = executeWhere(table, query);
+    return aggregateRows(
+        rowIDs.size(), [&](size_t i, uint16_t c) { return cellOf(table, rowIDs[i], c); }, columnTypes(table), query);
+}
+
+void setGroupedHeaders(const std::vector<ColType>& types, const ParsedQuery& query, MiniSQLResult& result) {
     for (const auto& item : query.selectItems) {
         result.headers.push_back(item.header());
-        result.types.push_back(item.isAggregate() ? aggregateType(table, item)
-                                                  : table.columnFile(item.column.index).colType());
+        result.types.push_back(item.isAggregate() ? aggregateType(inputType(types, item), item)
+                                                  : types.at(item.column.index));
     }
+}
+
+void setGroupedHeaders(const Table& table, const ParsedQuery& query, MiniSQLResult& result) {
+    setGroupedHeaders(columnTypes(table), query, result);
 }
 
 // GPU-capable fast path: one UINT32 key, no WHERE, only COUNT / SUM / AVG over
@@ -453,11 +487,10 @@ bool tryFastGroupBy(Engine& engine, Table& table, const ParsedQuery& query,
 
 // Generic hash aggregation over any key types (including STRING and multi-column
 // keys), any aggregates, with or without WHERE. Groups come out sorted by key.
-MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuery& query,
-                                  const std::vector<ColumnRef>& keys) {
+template <class Cell>
+MiniSQLResult groupRows(size_t n, Cell cell, const std::vector<ColType>& types, const ParsedQuery& query,
+                        const std::vector<ColumnRef>& keys) {
     MiniSQLResult result;
-    if (tryFastGroupBy(engine, table, query, keys, result)) return result;
-
     struct Group {
         std::vector<ColValue> key;
         std::vector<AggregateState> aggs;
@@ -465,14 +498,13 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
     std::vector<Group> groups;
     std::unordered_map<std::string, size_t> index;
 
-    const auto rowIDs = executeWhere(table, query);
     std::string encoded;
     std::vector<ColValue> key(keys.size());
-    for (uint32_t rowID : rowIDs) {
+    for (size_t rowID = 0; rowID < n; ++rowID) {
         encoded.clear();
         bool live = true;
         for (size_t k = 0; k < keys.size() && live; ++k) {
-            auto v = cellOf(table, rowID, keys[k].index);
+            auto v = cell(rowID, keys[k].index);
             if (!v) {
                 live = false;
                 break;
@@ -499,8 +531,8 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
             if (!item.isAggregate()) continue;
             if (item.kind == SelectItem::Kind::CountStar) {
                 ++g.aggs[i].count;
-            } else if (auto cell = cellOf(table, rowID, item.column.index)) {
-                g.aggs[i].add(*cell);
+            } else if (auto v = cell(rowID, item.column.index)) {
+                g.aggs[i].add(*v);
             }
         }
     }
@@ -518,13 +550,13 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
         return false;
     });
 
-    setGroupedHeaders(table, query, result);
+    setGroupedHeaders(types, query, result);
     for (const auto& g : groups) {
         std::vector<std::string> row;
         for (size_t i = 0; i < query.selectItems.size(); ++i) {
             const auto& item = query.selectItems[i];
             if (item.isAggregate()) {
-                row.push_back(formatAggregate(table, item, g.aggs[i]));
+                row.push_back(formatAggregate(inputType(types, item), item, g.aggs[i]));
             } else {
                 size_t k = 0;
                 while (keys[k].index != item.column.index) ++k;
@@ -534,6 +566,16 @@ MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuer
         result.rows.push_back(std::move(row));
     }
     return result;
+}
+
+MiniSQLResult executeGroupedQuery(Engine& engine, Table& table, const ParsedQuery& query,
+                                  const std::vector<ColumnRef>& keys) {
+    MiniSQLResult result;
+    if (tryFastGroupBy(engine, table, query, keys, result)) return result;
+    const auto rowIDs = executeWhere(table, query);
+    return groupRows(
+        rowIDs.size(), [&](size_t i, uint16_t c) { return cellOf(table, rowIDs[i], c); }, columnTypes(table), query,
+        keys);
 }
 
 Table& openExistingTable(Engine& engine, const std::string& tableName) {
@@ -690,7 +732,455 @@ void applyOrderAndLimit(const ParsedQuery& query, MiniSQLResult& result,
     }
 }
 
+// ── JOIN execution ───────────────────────────────────────────────────────────
+// SELECT ... FROM a [AS x] [INNER] JOIN b [AS y] ON x.cN = y.cM [AND ...] [JOIN ...]
+//
+// Plan: every column reference is resolved to a position in the combined row (the
+// tables' columns side by side, in FROM order) and canonicalized to "alias.cN".
+// WHERE conjuncts that touch a single table are pushed into that table's scan, so
+// they keep zone-map pruning and the hybrid GPU/CPU scan; the rest run row-wise on
+// joined rows. Tables are joined left-deep with a hash join (build on the joined
+// table, probe with the rows so far); then projection / aggregation / GROUP BY /
+// DISTINCT / ORDER BY / LIMIT run exactly as for one table. Inside a transaction
+// each table's scan sees that transaction's pending changes.
+
+struct JoinSource {
+    std::string name;
+    std::string alias;
+    Table* table = nullptr;
+    uint16_t offset = 0;  // first column of this table in the combined row
+    uint16_t width = 0;
+    std::vector<std::shared_ptr<WhereExpr>> pushed;  // conjuncts on this table only (local columns)
+    std::vector<bool> needed;                         // local columns to materialize
+};
+
+struct JoinPlan {
+    std::vector<JoinSource> sources;
+    std::vector<ColType> types;  // combined row layout
+    ParsedQuery query;           // column refs resolved to combined positions
+    // keys[j] joins sources[j + 1]: (combined column of an earlier table, local column of sources[j + 1])
+    std::vector<std::vector<std::pair<uint16_t, uint16_t>>> keys;
+    std::shared_ptr<WhereExpr> residual;  // conjuncts spanning tables (combined columns)
+};
+
+std::vector<std::string> statementTables(const ParsedQuery& query) {
+    std::vector<std::string> names{query.tableName};
+    for (const auto& j : query.joins) names.push_back(j.tableName);
+    return names;
+}
+
+std::shared_ptr<WhereExpr> cloneWhere(const WhereExpr& e) {
+    auto copy = std::make_shared<WhereExpr>(e);
+    for (auto& child : copy->children) child = cloneWhere(*child);
+    return copy;
+}
+
+template <class F>
+void forEachLeaf(WhereExpr& e, F&& f) {
+    if (e.kind == WhereExpr::Kind::And || e.kind == WhereExpr::Kind::Or || e.kind == WhereExpr::Kind::Not) {
+        for (auto& child : e.children) forEachLeaf(*child, f);
+    } else {
+        f(e);
+    }
+}
+
+char joinKeyClass(ColType t) {
+    switch (t) {
+        case ColType::UINT32:
+        case ColType::INT64: return 'I';
+        case ColType::FLOAT:
+        case ColType::DOUBLE: return 'F';
+        case ColType::STRING: return 'S';
+    }
+    return '?';
+}
+
+JoinPlan planJoin(Engine& engine, const ParsedQuery& query) {
+    JoinPlan plan;
+    auto addSource = [&](const std::string& name, const std::string& alias) {
+        for (const auto& s : plan.sources)
+            if (s.alias == alias)
+                throw std::invalid_argument("table name \"" + alias + "\" specified more than once (give it an alias)");
+        if (!engine.tableExists(name)) throw std::invalid_argument("table '" + name + "' does not exist");
+        JoinSource src;
+        src.name = name;
+        src.alias = alias;
+        src.table = &engine.openTable(name);
+        if (plan.types.size() + src.table->numColumns() > 0xFFFFu)
+            throw std::invalid_argument("too many columns in join");
+        src.offset = static_cast<uint16_t>(plan.types.size());
+        src.width = src.table->numColumns();
+        src.needed.assign(src.width, false);
+        for (ColType t : columnTypes(*src.table)) plan.types.push_back(t);
+        plan.sources.push_back(std::move(src));
+    };
+    addSource(query.tableName, query.alias.empty() ? query.tableName : query.alias);
+    for (const auto& j : query.joins) addSource(j.tableName, j.alias.empty() ? j.tableName : j.alias);
+
+    auto sourceOf = [&](uint16_t combined) {
+        size_t s = 0;
+        while (s + 1 < plan.sources.size() && combined >= plan.sources[s + 1].offset) ++s;
+        return s;
+    };
+    // Resolves `ref` in place; returns the index of its table.
+    auto resolve = [&](ColumnRef& ref) -> size_t {
+        const std::string col = "c" + std::to_string(ref.index);
+        size_t found = plan.sources.size();
+        if (!ref.qualifier.empty()) {
+            for (size_t s = 0; s < plan.sources.size(); ++s)
+                if (plan.sources[s].alias == ref.qualifier) found = s;
+            if (found == plan.sources.size())
+                throw std::invalid_argument("missing FROM-clause entry for table \"" + ref.qualifier + "\"");
+            if (ref.index >= plan.sources[found].width)
+                throw std::invalid_argument("column " + ref.qualifier + "." + col + " does not exist");
+        } else {
+            for (size_t s = 0; s < plan.sources.size(); ++s) {
+                if (ref.index >= plan.sources[s].width) continue;
+                if (found != plan.sources.size())
+                    throw std::invalid_argument("column reference \"" + col + "\" is ambiguous (qualify it, e.g. " +
+                                                plan.sources[found].alias + "." + col + ")");
+                found = s;
+            }
+            if (found == plan.sources.size()) throw std::invalid_argument("column " + col + " does not exist");
+        }
+        const JoinSource& src = plan.sources[found];
+        ref.qualifier = src.alias;
+        ref.text = src.alias + "." + col;
+        ref.index = static_cast<uint16_t>(src.offset + ref.index);
+        return found;
+    };
+
+    ParsedQuery& q = plan.query;
+    q = query;
+    q.joins.clear();
+    q.selectItems.clear();
+    for (const auto& item : query.selectItems) {
+        if (item.kind == SelectItem::Kind::Star) {  // * or alias.*: expand to that table's columns
+            bool matched = false;
+            for (const auto& src : plan.sources) {
+                if (!item.column.qualifier.empty() && item.column.qualifier != src.alias) continue;
+                matched = true;
+                for (uint16_t c = 0; c < src.width; ++c) {
+                    SelectItem col;
+                    col.column = {c, "c" + std::to_string(c), src.alias};
+                    resolve(col.column);
+                    q.selectItems.push_back(col);
+                }
+            }
+            if (!matched)
+                throw std::invalid_argument("missing FROM-clause entry for table \"" + item.column.qualifier + "\"");
+            continue;
+        }
+        SelectItem resolved = item;
+        if (resolved.kind != SelectItem::Kind::CountStar) resolve(resolved.column);
+        q.selectItems.push_back(resolved);
+    }
+    if (q.where) {
+        q.where = cloneWhere(*query.where);
+        forEachLeaf(*q.where, [&](WhereExpr& leaf) {
+            resolve(leaf.column);
+            if (leaf.kind == WhereExpr::Kind::ColumnCompare) resolve(leaf.rhs);
+        });
+    }
+    for (auto& key : q.groupBy) resolve(key);
+    for (auto& key : q.orderBy) {
+        if (key.position != 0) continue;
+        if (key.item.kind != SelectItem::Kind::CountStar) resolve(key.item.column);
+        key.header = key.item.header();
+    }
+
+    for (size_t j = 0; j < query.joins.size(); ++j) {
+        const size_t right = j + 1;
+        std::vector<std::pair<uint16_t, uint16_t>> keys;
+        for (auto [l, r] : query.joins[j].on) {
+            size_t sl = resolve(l);
+            size_t sr = resolve(r);
+            if (sl == right && sr < right) {
+                std::swap(l, r);
+                std::swap(sl, sr);
+            }
+            if (!(sr == right && sl < right))
+                throw std::invalid_argument("JOIN condition " + l.text + " = " + r.text + " must compare a column of \"" +
+                                            plan.sources[right].alias + "\" with a column of an earlier table");
+            if (joinKeyClass(plan.types[l.index]) != joinKeyClass(plan.types[r.index]))
+                throw std::invalid_argument(std::string("cannot join ") + colTypeName(plan.types[l.index]) + " " +
+                                            l.text + " with " + colTypeName(plan.types[r.index]) + " " + r.text);
+            keys.emplace_back(l.index, static_cast<uint16_t>(r.index - plan.sources[right].offset));
+        }
+        plan.keys.push_back(std::move(keys));
+    }
+
+    validateQueryShape(plan.types, q);
+
+    // Split WHERE: single-table conjuncts go to that table's scan.
+    if (q.where) {
+        std::vector<std::shared_ptr<WhereExpr>> conjuncts;
+        if (q.where->kind == WhereExpr::Kind::And) conjuncts = q.where->children;
+        else conjuncts.push_back(q.where);
+        std::vector<std::shared_ptr<WhereExpr>> rest;
+        for (const auto& c : conjuncts) {
+            std::vector<bool> touches(plan.sources.size(), false);
+            forEachLeaf(*c, [&](WhereExpr& leaf) {
+                touches[sourceOf(leaf.column.index)] = true;
+                if (leaf.kind == WhereExpr::Kind::ColumnCompare) touches[sourceOf(leaf.rhs.index)] = true;
+            });
+            if (std::count(touches.begin(), touches.end(), true) != 1) {
+                rest.push_back(c);
+                continue;
+            }
+            JoinSource& src = plan.sources[std::find(touches.begin(), touches.end(), true) - touches.begin()];
+            auto local = cloneWhere(*c);
+            auto toLocal = [&](ColumnRef& ref) {
+                ref.index = static_cast<uint16_t>(ref.index - src.offset);
+                ref.text = "c" + std::to_string(ref.index);
+                ref.qualifier.clear();
+            };
+            forEachLeaf(*local, [&](WhereExpr& leaf) {
+                toLocal(leaf.column);
+                if (leaf.kind == WhereExpr::Kind::ColumnCompare) toLocal(leaf.rhs);
+            });
+            src.pushed.push_back(local);
+        }
+        if (rest.size() == 1) {
+            plan.residual = rest.front();
+        } else if (!rest.empty()) {
+            plan.residual = std::make_shared<WhereExpr>();
+            plan.residual->kind = WhereExpr::Kind::And;
+            plan.residual->children = rest;
+        }
+    }
+
+    // Materialize only the columns the statement reads after the scans.
+    auto need = [&](uint16_t combined) {
+        JoinSource& src = plan.sources[sourceOf(combined)];
+        src.needed[combined - src.offset] = true;
+    };
+    for (const auto& item : q.selectItems)
+        if (item.kind != SelectItem::Kind::CountStar) need(item.column.index);
+    for (const auto& key : q.groupBy) need(key.index);
+    for (const auto& key : q.orderBy)
+        if (key.position == 0 && key.item.kind != SelectItem::Kind::CountStar) need(key.item.column.index);
+    for (size_t j = 0; j < plan.keys.size(); ++j)
+        for (const auto& [l, r] : plan.keys[j]) {
+            need(l);
+            plan.sources[j + 1].needed[r] = true;
+        }
+    if (plan.residual)
+        forEachLeaf(*plan.residual, [&](WhereExpr& leaf) {
+            need(leaf.column.index);
+            if (leaf.kind == WhereExpr::Kind::ColumnCompare) need(leaf.rhs.index);
+        });
+    return plan;
+}
+
+// Live rows of one table (its pushed-down filter applied), at local column positions.
+std::vector<std::vector<ColValue>> scanJoinSource(const JoinSource& src) {
+    TableChanges* const saved = g_changes;
+    struct Restore {
+        TableChanges* saved;
+        ~Restore() { g_changes = saved; }
+    } restore{saved};
+    g_changes = g_txn ? g_txn->changesFor(src.name) : nullptr;
+
+    ParsedQuery scan;
+    scan.tableName = src.name;
+    if (src.pushed.size() == 1) {
+        scan.where = src.pushed.front();
+    } else if (!src.pushed.empty()) {
+        scan.where = std::make_shared<WhereExpr>();
+        scan.where->kind = WhereExpr::Kind::And;
+        scan.where->children = src.pushed;
+    }
+    trace("Scan: '" + src.name + "'" + (src.alias != src.name ? " AS " + src.alias : std::string()));
+    const auto ids = executeWhere(*src.table, scan);
+
+    std::vector<std::vector<ColValue>> rows;
+    rows.reserve(ids.size());
+    for (uint32_t id : ids) {
+        std::vector<ColValue> row(src.width);
+        bool live = true;
+        for (uint16_t c = 0; c < src.width && live; ++c) {
+            if (!src.needed[c]) continue;
+            auto v = cellOf(*src.table, id, c);
+            if (!v) live = false;
+            else row[c] = std::move(*v);
+        }
+        if (live) rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+// Equality key over `cols` of `row`: integers compare as integers, FLOAT / DOUBLE as
+// doubles, strings bytewise. NaN equals nothing (returns false).
+bool encodeJoinKey(const std::vector<ColValue>& row, const std::vector<uint16_t>& cols, std::string& out) {
+    out.clear();
+    for (uint16_t c : cols) {
+        const ColValue& v = row[c];
+        switch (v.type) {
+            case ColType::UINT32:
+            case ColType::INT64: {
+                const int64_t x = v.type == ColType::UINT32 ? static_cast<int64_t>(v.u32) : v.i64;
+                out.push_back('I');
+                out.append(reinterpret_cast<const char*>(&x), sizeof(x));
+                break;
+            }
+            case ColType::FLOAT:
+            case ColType::DOUBLE: {
+                double x = v.type == ColType::FLOAT ? static_cast<double>(v.f32) : v.f64;
+                if (x != x) return false;
+                if (x == 0) x = 0;  // -0 joins 0
+                out.push_back('F');
+                out.append(reinterpret_cast<const char*>(&x), sizeof(x));
+                break;
+            }
+            case ColType::STRING: {
+                const uint32_t len = static_cast<uint32_t>(v.str.size());
+                out.push_back('S');
+                out.append(reinterpret_cast<const char*>(&len), sizeof(len));
+                out.append(v.str);
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+MiniSQLResult executeJoinSelect(Engine& engine, const ParsedQuery& query) {
+    JoinPlan plan = planJoin(engine, query);
+    const ParsedQuery& q = plan.query;
+    const size_t width = plan.types.size();
+
+    // Rows so far, at combined positions (columns of not-yet-joined tables unset).
+    std::vector<std::vector<ColValue>> rows;
+    for (auto& r : scanJoinSource(plan.sources[0])) {
+        r.resize(width);
+        rows.push_back(std::move(r));
+    }
+
+    std::string key;
+    for (size_t j = 0; j < plan.keys.size(); ++j) {
+        const JoinSource& src = plan.sources[j + 1];
+        const auto start = std::chrono::steady_clock::now();
+        const auto build = scanJoinSource(src);
+        std::vector<uint16_t> leftCols;
+        std::vector<uint16_t> rightCols;
+        for (const auto& [l, r] : plan.keys[j]) {
+            leftCols.push_back(l);
+            rightCols.push_back(r);
+        }
+        std::unordered_map<std::string, std::vector<uint32_t>> table;
+        table.reserve(build.size());
+        for (uint32_t i = 0; i < build.size(); ++i)
+            if (encodeJoinKey(build[i], rightCols, key)) table[key].push_back(i);
+
+        std::vector<std::vector<ColValue>> joined;
+        for (auto& left : rows) {
+            if (!encodeJoinKey(left, leftCols, key)) continue;
+            auto it = table.find(key);
+            if (it == table.end()) continue;
+            for (uint32_t i : it->second) {
+                std::vector<ColValue> out = left;
+                for (uint16_t c = 0; c < src.width; ++c)
+                    if (src.needed[c]) out[src.offset + c] = build[i][c];
+                joined.push_back(std::move(out));
+            }
+        }
+        if (g_trace) {
+            std::string on;
+            for (const auto& [l, r] : query.joins[j].on) on += (on.empty() ? "" : " AND ") + l.text + " = " + r.text;
+            trace("Join: CPU hash join ON " + on + " (build " + std::to_string(build.size()) + " rows of '" +
+                  src.name + "', probe " + std::to_string(rows.size()) + ") -> " + std::to_string(joined.size()) +
+                  " rows in " + fmtMs(msSince(start)));
+        }
+        rows = std::move(joined);
+    }
+
+    if (plan.residual) {
+        const size_t before = rows.size();
+        rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                  [&](const std::vector<ColValue>& r) { return !rowMatches(*plan.residual, r); }),
+                   rows.end());
+        trace("Filter (joined rows): " + whereToString(*plan.residual) + " -> " + std::to_string(rows.size()) +
+              " of " + std::to_string(before) + " rows");
+    }
+
+    auto cell = [&](size_t i, uint16_t c) { return std::optional<ColValue>(rows[i][c]); };
+    bool aggregateQuery = false;
+    for (const auto& item : q.selectItems) aggregateQuery = aggregateQuery || item.isAggregate();
+
+    MiniSQLResult result;
+    if (q.distinct) {
+        ParsedQuery grouped = q;
+        grouped.distinct = false;
+        for (const auto& item : grouped.selectItems) {
+            const bool seen = std::any_of(grouped.groupBy.begin(), grouped.groupBy.end(),
+                                          [&](const ColumnRef& k) { return k.index == item.column.index; });
+            if (!seen) grouped.groupBy.push_back(item.column);
+        }
+        result = groupRows(rows.size(), cell, plan.types, grouped, grouped.groupBy);
+    } else if (!q.groupBy.empty()) {
+        result = groupRows(rows.size(), cell, plan.types, q, q.groupBy);
+    } else if (aggregateQuery) {
+        result = aggregateRows(rows.size(), cell, plan.types, q);
+    } else {
+        // Projection; ORDER BY columns that are not selected ride along hidden.
+        std::vector<uint16_t> cols;
+        for (const auto& item : q.selectItems) {
+            cols.push_back(item.column.index);
+            result.headers.push_back(item.header());
+            result.types.push_back(plan.types[item.column.index]);
+        }
+        const size_t visible = cols.size();
+        for (const auto& key : q.orderBy) {
+            if (key.position != 0 || key.item.kind != SelectItem::Kind::Column) continue;
+            if (std::find(result.headers.begin(), result.headers.end(), key.header) != result.headers.end()) continue;
+            cols.push_back(key.item.column.index);
+            result.headers.push_back(key.header);
+            result.types.push_back(plan.types[key.item.column.index]);
+        }
+        trace("Project: " + std::to_string(visible) + " column(s) over " + std::to_string(rows.size()) + " rows");
+        result.rows.reserve(rows.size());
+        for (const auto& r : rows) {
+            std::vector<std::string> out;
+            out.reserve(cols.size());
+            for (uint16_t c : cols) out.push_back(formatColValue(r[c]));
+            result.rows.push_back(std::move(out));
+        }
+        if (!q.orderBy.empty())
+            trace("Sort: " + std::to_string(q.orderBy.size()) + " key(s), " + std::to_string(result.rows.size()) + " rows");
+        applyOrderAndLimit(q, result, false);
+        result.headers.resize(visible);
+        result.types.resize(visible);
+        for (auto& row : result.rows) row.resize(visible);
+        return result;
+    }
+    if (!q.orderBy.empty())
+        trace("Sort: " + std::to_string(q.orderBy.size()) + " key(s), " + std::to_string(result.rows.size()) + " rows");
+    applyOrderAndLimit(q, result, false);
+    return result;
+}
+
+// Locks every table a statement reads, in a fixed (address) order so two joins
+// over the same tables can never deadlock; a table named twice is locked once.
+class StatementLocks {
+public:
+    StatementLocks(Engine& engine, const std::vector<std::string>& names) {
+        std::vector<std::mutex*> mutexes;
+        for (const auto& name : names) {
+            (void)engine.resolveTableBase(name);  // sandbox check before locking
+            mutexes.push_back(&engine.tableMutex(name));
+        }
+        std::sort(mutexes.begin(), mutexes.end());
+        mutexes.erase(std::unique(mutexes.begin(), mutexes.end()), mutexes.end());
+        for (std::mutex* m : mutexes) locks_.emplace_back(*m);
+    }
+
+private:
+    std::vector<std::unique_lock<std::mutex>> locks_;
+};
+
 MiniSQLResult executeSelect(Engine& engine, const ParsedQuery& query) {
+    if (!query.joins.empty()) return executeJoinSelect(engine, query);
     Table& table = openExistingTable(engine, query.tableName);
     validateQueryShape(table, query);
 
@@ -846,6 +1336,7 @@ const char* statementName(ParsedStatement::Kind kind) {
         case ParsedStatement::Kind::Update: return "UPDATE";
         case ParsedStatement::Kind::Describe: return "DESCRIBE";
         case ParsedStatement::Kind::Copy: return "COPY";
+        default: break;
     }
     return "?";
 }
@@ -861,7 +1352,10 @@ MiniSQLResult executeExplain(Engine& engine, const ParsedStatement& stmt) {
 
     const auto start = std::chrono::steady_clock::now();
     t.add(std::string("Statement: ") + statementName(stmt.kind));
-    if (stmt.kind == ParsedStatement::Kind::Select || stmt.kind == ParsedStatement::Kind::Delete ||
+    if (stmt.kind == ParsedStatement::Kind::Select && !stmt.query.joins.empty()) {
+        const auto result = executeSelect(engine, stmt.query);
+        t.add("Output: " + std::to_string(result.rows.size()) + " rows");
+    } else if (stmt.kind == ParsedStatement::Kind::Select || stmt.kind == ParsedStatement::Kind::Delete ||
         stmt.kind == ParsedStatement::Kind::Update) {
         Table& table = openExistingTable(engine, stmt.query.tableName);
         t.add("Table: '" + stmt.query.tableName + "' (" + std::to_string(table.rowCount()) + " live rows, " +
@@ -911,8 +1405,12 @@ MiniSQLResult describeMiniSQL(Engine& engine, const std::string& sqlText,
     }
     if (stmt.kind != ParsedStatement::Kind::Select) return shape;
 
-    (void)engine.resolveTableBase(stmt.query.tableName);
-    std::lock_guard<std::mutex> tableLock(engine.tableMutex(stmt.query.tableName));
+    StatementLocks locks(engine, statementTables(stmt.query));
+    if (!stmt.query.joins.empty()) {
+        const JoinPlan plan = planJoin(engine, stmt.query);
+        setGroupedHeaders(plan.types, plan.query, shape);
+        return shape;
+    }
     Table& table = openExistingTable(engine, stmt.query.tableName);
     validateQueryShape(table, stmt.query);
     const auto& items = stmt.query.selectItems;
@@ -948,10 +1446,9 @@ std::vector<uint32_t> TableChanges::deletedRowIDs() const {
 MiniSQLResult executeParsedStatement(Engine& engine, const ParsedStatement& stmt, TxnHook* txn) {
     if (stmt.isTransactionControl())
         throw std::invalid_argument("BEGIN / COMMIT / ROLLBACK need a session (use Session, the REPL, or a server)");
-    // Every statement touches exactly one table; serialize statements per table so
-    // concurrent sessions (server threads) never share a Table's mutable caches.
-    (void)engine.resolveTableBase(stmt.query.tableName);  // sandbox check before locking
-    std::lock_guard<std::mutex> tableLock(engine.tableMutex(stmt.query.tableName));
+    // Serialize statements per table so concurrent sessions (server threads) never
+    // share a Table's mutable caches. A join locks every table it reads.
+    StatementLocks locks(engine, statementTables(stmt.query));
 
     struct Scope {
         Scope(TxnHook* t, const std::string& name) {

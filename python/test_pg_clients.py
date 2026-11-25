@@ -85,6 +85,21 @@ def run_psycopg3(port):
     cur.execute("SELECT version()")
     check("MetalDB" in cur.fetchone()[0], "psycopg3 version()")
 
+    # Joins through the extended protocol: describe, bound parameters, typed columns.
+    cur.execute("CREATE TABLE pets (UINT32, STRING)")
+    cur.execute("INSERT INTO pets VALUES (1, 'rex'), (2, 'tom'), (2, 'kit'), (77, 'nobody')")
+    cur.execute("SELECT p.c1, o.c1, p.c2 FROM people p JOIN pets o ON p.c0 = o.c0 "
+                "WHERE p.c0 <= %s ORDER BY o.c1", (2,))
+    check([d.name for d in cur.description] == ["p.c1", "o.c1", "p.c2"], "psycopg3 join column names")
+    check([d.type_code for d in cur.description] == [25, 25, 701], "psycopg3 join column OIDs")
+    check(cur.fetchall() == [("name2", "kit", 3.0), ("name1", "rex", 1.5), ("name2", "tom", 3.0)],
+          "psycopg3 join rows")
+    try:
+        cur.execute("SELECT c1 FROM people p JOIN pets o ON p.c0 = o.c0")
+        check(False, "psycopg3 ambiguous column should raise")
+    except psycopg.Error as ex:
+        check(ex.sqlstate == "42702", "psycopg3 ambiguous column SQLSTATE")
+
     try:
         cur.execute("SELECT * FROM missing WHERE c0 = %s", (1,))
         check(False, "psycopg3 missing table should raise")

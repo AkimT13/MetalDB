@@ -77,6 +77,36 @@ bool applyOp(WhereExpr::Op op, int cmp) {
     return false;
 }
 
+// Three-way compare of two stored values of compatible types (both STRING or both
+// numeric). Integers compare exactly; anything involving a float as long double.
+int compareValues(const ColValue& a, const ColValue& b) {
+    if (a.type == ColType::STRING) {
+        const int c = a.str.compare(b.str);
+        return c < 0 ? -1 : (c > 0 ? 1 : 0);
+    }
+    auto isInt = [](ColType t) { return t == ColType::UINT32 || t == ColType::INT64; };
+    auto asInt = [](const ColValue& v) { return v.type == ColType::UINT32 ? static_cast<int64_t>(v.u32) : v.i64; };
+    auto asLD = [](const ColValue& v) -> long double {
+        switch (v.type) {
+            case ColType::UINT32: return v.u32;
+            case ColType::INT64: return static_cast<long double>(v.i64);
+            case ColType::FLOAT: return v.f32;
+            case ColType::DOUBLE: return v.f64;
+            case ColType::STRING: break;
+        }
+        return 0;
+    };
+    if (isInt(a.type) && isInt(b.type)) {
+        const int64_t x = asInt(a), y = asInt(b);
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    const long double x = asLD(a), y = asLD(b);
+    if (x < y) return -1;
+    if (x > y) return 1;
+    if (x == y) return 0;
+    return 2;  // NaN
+}
+
 const char* opText(WhereExpr::Op op) {
     switch (op) {
         case WhereExpr::Op::Eq: return "=";
@@ -181,11 +211,27 @@ public:
             case WhereExpr::Kind::Between:
             case WhereExpr::Kind::In:
                 return evalLeaf(e);
+            case WhereExpr::Kind::ColumnCompare:
+                return evalColumnCompare(e);
         }
         return {};
     }
 
 private:
+    // column <op> column: one CPU pass fetching both cells of every live row.
+    std::vector<uint32_t> evalColumnCompare(const WhereExpr& e) {
+        note(whereToString(e) + ": CPU scan comparing two columns");
+        std::vector<uint32_t> out;
+        const ColumnFile& lf = table_.columnFile(e.column.index);
+        const ColumnFile& rf = table_.columnFile(e.rhs.index);
+        table_.rowIndexForEachLive([&](uint32_t rowID, const std::vector<uint32_t>& slots) {
+            auto a = lf.fetchTypedSlot(slots[e.column.index]);
+            auto b = rf.fetchTypedSlot(slots[e.rhs.index]);
+            if (a && b && applyOp(e.op, compareValues(*a, *b))) out.push_back(rowID);
+        });
+        return out;
+    }
+
     std::vector<uint32_t> evalLeaf(const WhereExpr& e) {
         const ColType type = table_.columnFile(e.column.index).colType();
         std::vector<uint32_t> ids;
@@ -402,14 +448,30 @@ ColValue coerceLiteral(const Token& token, ColType type, size_t colIdx) {
 }
 
 void validateWhere(const Table& table, const WhereExpr& expr) {
+    std::vector<ColType> types;
+    types.reserve(table.numColumns());
+    for (uint16_t c = 0; c < table.numColumns(); ++c) types.push_back(table.columnFile(c).colType());
+    validateWhere(types, expr);
+}
+
+void validateWhere(const std::vector<ColType>& types, const WhereExpr& expr) {
     if (expr.kind == WhereExpr::Kind::And || expr.kind == WhereExpr::Kind::Or ||
         expr.kind == WhereExpr::Kind::Not) {
-        for (const auto& child : expr.children) validateWhere(table, *child);
+        for (const auto& child : expr.children) validateWhere(types, *child);
         return;
     }
-    if (expr.column.index >= table.numColumns())
+    if (expr.column.index >= types.size())
         throw std::invalid_argument("column " + expr.column.text + " out of bounds");
-    const bool stringCol = table.columnFile(expr.column.index).colType() == ColType::STRING;
+    const bool stringCol = types[expr.column.index] == ColType::STRING;
+    if (expr.kind == WhereExpr::Kind::ColumnCompare) {
+        if (expr.rhs.index >= types.size())
+            throw std::invalid_argument("column " + expr.rhs.text + " out of bounds");
+        if (stringCol != (types[expr.rhs.index] == ColType::STRING))
+            throw std::invalid_argument("cannot compare " + std::string(colTypeName(types[expr.column.index])) + " " +
+                                        expr.column.text + " with " + colTypeName(types[expr.rhs.index]) + " " +
+                                        expr.rhs.text);
+        return;
+    }
     for (const auto& lit : expr.literals) {
         if (lit.kind == TokenKind::Untyped) {  // bound parameter: takes the column's type
             if (!stringCol) (void)parseNumeric(lit);
@@ -439,6 +501,7 @@ bool rowMatches(const WhereExpr& e, const std::vector<ColValue>& row) {
             break;
     }
     const ColValue& v = row.at(e.column.index);
+    if (e.kind == WhereExpr::Kind::ColumnCompare) return applyOp(e.op, compareValues(v, row.at(e.rhs.index)));
     if (v.type == ColType::STRING) {
         auto cmp = [&](const Token& lit) {
             const int c = v.str.compare(lit.text);
@@ -474,6 +537,8 @@ std::string whereToString(const WhereExpr& e) {
     switch (e.kind) {
         case WhereExpr::Kind::Compare:
             return e.column.text + " " + opText(e.op) + " " + literalText(e.literals[0]);
+        case WhereExpr::Kind::ColumnCompare:
+            return e.column.text + " " + opText(e.op) + " " + e.rhs.text;
         case WhereExpr::Kind::Between:
             return e.column.text + " BETWEEN " + literalText(e.literals[0]) + " AND " + literalText(e.literals[1]);
         case WhereExpr::Kind::In: {

@@ -67,7 +67,8 @@ Parser for `SELECT col FROM table WHERE ... GROUP BY ...`. No subqueries or CTEs
 cover 80% of analytical queries. Makes the engine usable without writing C++.
 v2 adds `CREATE TABLE`, `INSERT`, `DELETE`, `DESCRIBE`, `<`/`<=`/`>`/`>=`, `ORDER BY`, and
 `LIMIT`/`OFFSET`. v3 adds boolean WHERE trees (AND/OR/NOT, parens, `!=`, IN) on all types, and `UPDATE`.
-Still missing: joins, arithmetic expressions.
+v4 adds inner joins (`JOIN ... ON`, aliases, multi-way, WHERE pushdown) and column-to-column
+comparisons. Still missing: outer joins, arithmetic expressions.
 
 ### Networking / Server Mode  [DONE: line protocol + Postgres wire (simple query)]
 `mdb serve <port>` now exposes the mini-SQL executor over a simple loopback TCP server:

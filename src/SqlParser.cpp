@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 
@@ -287,13 +288,15 @@ private:
         query.selectItems = parseSelectList();
         expectKeyword("FROM");
         query.tableName = expectTablePath();
+        query.alias = parseAlias(query.tableName);
+        parseJoins(query);
 
         if (matchKeyword("WHERE")) query.where = parseOr();
 
         if (matchKeyword("GROUP")) {
             expectKeyword("BY");
             do {
-                query.groupBy.push_back(parseColumnRef(expect(TokenKind::Identifier, "group-by column")));
+                query.groupBy.push_back(parseColumn(expect(TokenKind::Identifier, "group-by column")));
             } while (match(TokenKind::Comma));
         }
 
@@ -310,7 +313,84 @@ private:
             if (matchKeyword("OFFSET"))
                 query.offset = parseCount(expectNumeric("OFFSET count"));
         }
+        if (query.joins.empty()) stripQualifiers(query);
         return query;
+    }
+
+    // Words that end a table reference instead of naming its alias.
+    bool atClauseKeyword() const {
+        static const char* const kWords[] = {"WHERE", "GROUP", "ORDER", "LIMIT", "OFFSET", "JOIN", "INNER",
+                                             "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL", "ON", "USING", "SET",
+                                             "VALUES", "TO", "FROM", "WITH"};
+        for (const char* w : kWords)
+            if (isKeyword(w)) return true;
+        return false;
+    }
+
+    // [AS] alias after a table reference; defaults to the table name.
+    std::string parseAlias(const std::string& tableName) {
+        if (matchKeyword("AS")) {
+            if (peek().kind != TokenKind::Identifier && peek().kind != TokenKind::QuotedIdent)
+                throw std::invalid_argument("expected alias after AS");
+            return tokens_[pos_++].text;
+        }
+        if ((peek().kind == TokenKind::Identifier && !atClauseKeyword()) || peek().kind == TokenKind::QuotedIdent)
+            return tokens_[pos_++].text;
+        return tableName;
+    }
+
+    // { [INNER] JOIN <table> [[AS] alias] ON a.cN = b.cM [AND ...] }*
+    void parseJoins(ParsedQuery& query) {
+        while (true) {
+            if (isKeyword("LEFT") || isKeyword("RIGHT") || isKeyword("FULL") || isKeyword("CROSS") ||
+                isKeyword("NATURAL"))
+                throw std::invalid_argument("only INNER JOIN ... ON is supported (MetalDB has no NULLs for outer joins)");
+            if (peek().kind == TokenKind::Comma)
+                throw std::invalid_argument("comma-separated FROM lists are not supported; use JOIN ... ON");
+            if (matchKeyword("INNER")) expectKeyword("JOIN");
+            else if (!matchKeyword("JOIN")) return;
+
+            JoinClause join;
+            join.tableName = expectTablePath();
+            join.alias = parseAlias(join.tableName);
+            if (isKeyword("USING")) throw std::invalid_argument("JOIN ... USING is not supported; use ON");
+            expectKeyword("ON");
+            const bool paren = match(TokenKind::LParen);
+            do {
+                ColumnRef lhs = parseColumn(expect(TokenKind::Identifier, "join column"));
+                expect(TokenKind::Eq, "= (joins compare columns for equality)");
+                ColumnRef rhs = parseColumn(expect(TokenKind::Identifier, "join column"));
+                join.on.emplace_back(std::move(lhs), std::move(rhs));
+            } while (matchKeyword("AND"));
+            if (paren) expect(TokenKind::RParen, ")");
+            query.joins.push_back(std::move(join));
+        }
+    }
+
+    // Single-table statements accept "alias.cN"; check the alias and drop it, so
+    // the executor (and output headers) only ever see "cN".
+    static void stripQualifiers(ParsedQuery& query) {
+        const std::string& alias = query.alias.empty() ? query.tableName : query.alias;
+        auto fix = [&](ColumnRef& ref) {
+            if (ref.qualifier.empty()) return;
+            if (ref.qualifier != alias)
+                throw std::invalid_argument("missing FROM-clause entry for table \"" + ref.qualifier + "\"");
+            ref.qualifier.clear();
+            ref.text = "c" + std::to_string(ref.index);
+        };
+        std::function<void(WhereExpr&)> walk = [&](WhereExpr& e) {
+            fix(e.column);
+            if (e.kind == WhereExpr::Kind::ColumnCompare) fix(e.rhs);
+            for (auto& c : e.children) walk(*c);
+        };
+        for (auto& item : query.selectItems) fix(item.column);
+        if (query.where) walk(*query.where);
+        for (auto& key : query.groupBy) fix(key);
+        for (auto& key : query.orderBy) {
+            if (key.position != 0) continue;
+            fix(key.item.column);
+            key.header = key.item.header();
+        }
     }
 
     void skipTransactionOptions() {
@@ -360,6 +440,7 @@ private:
         expectKeyword("FROM");
         stmt.query.tableName = expectTablePath();
         if (matchKeyword("WHERE")) stmt.query.where = parseOr();
+        stripQualifiers(stmt.query);
     }
 
     // UPDATE '<path>' SET cN = literal [, cM = literal]* [WHERE ...]
@@ -377,6 +458,7 @@ private:
             stmt.assignments.push_back(std::move(a));
         } while (match(TokenKind::Comma));
         if (matchKeyword("WHERE")) stmt.query.where = parseOr();
+        stripQualifiers(stmt.query);
     }
 
     // COPY '<table>' FROM '<file>' [WITH HEADER]
@@ -446,7 +528,7 @@ private:
         }
 
         auto leaf = std::make_shared<WhereExpr>();
-        leaf->column = parseColumnRef(expect(TokenKind::Identifier, "predicate column"));
+        leaf->column = parseColumn(expect(TokenKind::Identifier, "predicate column"));
 
         const bool negated = matchKeyword("NOT");
         if (matchKeyword("BETWEEN")) {
@@ -479,6 +561,11 @@ private:
                 throw std::invalid_argument("expected comparison operator, BETWEEN, or IN");
         }
         ++pos_;
+        if (peek().kind == TokenKind::Identifier) {  // column <op> column
+            leaf->kind = WhereExpr::Kind::ColumnCompare;
+            leaf->rhs = parseColumn(tokens_[pos_++]);
+            return leaf;
+        }
         leaf->literals.push_back(expectLiteral("after comparison operator"));
         return leaf;
     }
@@ -508,6 +595,13 @@ private:
         }
 
         const Token token = expect(TokenKind::Identifier, "select item");
+        if (peek().kind == TokenKind::Dot && tokens_[pos_ + 1].kind == TokenKind::Star) {  // alias.*
+            pos_ += 2;
+            SelectItem item;
+            item.kind = SelectItem::Kind::Star;
+            item.column.qualifier = token.text;
+            return item;
+        }
         if (peek().kind == TokenKind::LParen) {
             if (equalsIgnoreCase(token.text, "COUNT")) return parseAggregate(SelectItem::Kind::Count, true);
             if (equalsIgnoreCase(token.text, "SUM")) return parseAggregate(SelectItem::Kind::Sum, false);
@@ -519,7 +613,7 @@ private:
 
         SelectItem item;
         item.kind = SelectItem::Kind::Column;
-        item.column = parseColumnRef(token);
+        item.column = parseColumn(token);
         return item;
     }
 
@@ -532,7 +626,7 @@ private:
             item.kind = SelectItem::Kind::CountStar;
             return item;
         }
-        item.column = parseColumnRef(expect(TokenKind::Identifier, "aggregate column"));
+        item.column = parseColumn(expect(TokenKind::Identifier, "aggregate column"));
         expect(TokenKind::RParen, ")");
         return item;
     }
@@ -543,10 +637,10 @@ private:
             key.position = parseCount(tokens_[pos_++]);
             if (key.position == 0) throw std::invalid_argument("ORDER BY position must be >= 1");
         } else {
-            const SelectItem item = parseSelectItem();
-            if (item.kind == SelectItem::Kind::Star)
+            key.item = parseSelectItem();
+            if (key.item.kind == SelectItem::Kind::Star)
                 throw std::invalid_argument("ORDER BY * is not supported");
-            key.header = item.header();
+            key.header = key.item.header();
         }
         if (matchKeyword("DESC")) key.descending = true;
         else (void)matchKeyword("ASC");
@@ -595,6 +689,16 @@ private:
         throw std::invalid_argument("unknown column type: " + token.text);
     }
 
+    // cN or qualifier.cN, starting at an already-consumed identifier.
+    ColumnRef parseColumn(const Token& first) {
+        if (peek().kind != TokenKind::Dot) return parseColumnRef(first);
+        ++pos_;
+        ColumnRef ref = parseColumnRef(expect(TokenKind::Identifier, "column after '.'"));
+        ref.qualifier = first.text;
+        ref.text = first.text + "." + ref.text;
+        return ref;
+    }
+
     static ColumnRef parseColumnRef(const Token& token) {
         if (token.kind != TokenKind::Identifier || token.text.size() < 2 ||
             (token.text[0] != 'c' && token.text[0] != 'C')) {
@@ -608,7 +712,7 @@ private:
         if (digits.size() > 5 || std::stoul(digits) > 0xFFFFul)
             throw std::invalid_argument("column index out of range");
         const unsigned long index = std::stoul(digits);
-        return {static_cast<uint16_t>(index), "c" + std::to_string(index)};
+        return {static_cast<uint16_t>(index), "c" + std::to_string(index), ""};
     }
 
     static uint64_t parseCount(const Token& token) {

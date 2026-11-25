@@ -23,6 +23,8 @@ ColValue coerceLiteral(const Token& token, ColType type, size_t colIdx);
 
 // Checks column bounds and literal/column type compatibility for every leaf.
 void validateWhere(const Table& table, const WhereExpr& expr);
+// Same, against a row layout given by its column types (e.g. a joined row).
+void validateWhere(const std::vector<ColType>& types, const WhereExpr& expr);
 
 // Evaluates `expr` (validated first) against `table`. When `trace` is non-null,
 // one human-readable line per leaf access path is appended (used by EXPLAIN).

@@ -259,7 +259,17 @@ std::vector<std::string> words(const std::string& s, size_t max) {
 
 const char* sqlStateFor(const std::string& m, bool userError) {
     if (!userError) return "XX000";  // internal_error
-    if (m.find("does not exist") != std::string::npos) return "42P01";         // undefined_table
+    if (m.rfind("column ", 0) == 0 && m.find("does not exist") != std::string::npos)
+        return "42703";                                                       // undefined_column
+    if (m.find("is ambiguous") != std::string::npos) return "42702";           // ambiguous_column
+    if (m.find("missing FROM-clause") != std::string::npos ||
+        m.find("does not exist") != std::string::npos) return "42P01";         // undefined_table
+    if (m.find("specified more than once") != std::string::npos) return "42712";  // duplicate_alias
+    if (m.find("cannot join") != std::string::npos ||
+        m.find("cannot compare") != std::string::npos) return "42804";         // datatype_mismatch
+    if (m.find("only INNER JOIN") != std::string::npos ||
+        m.find("is not supported") != std::string::npos ||
+        m.find("are not supported") != std::string::npos) return "0A000";      // feature_not_supported
     if (m.find("already exists") != std::string::npos) return "42P07";         // duplicate_table
     if (m.find("out of bounds") != std::string::npos ||
         m.find("must appear in") != std::string::npos) return "42703";         // undefined_column

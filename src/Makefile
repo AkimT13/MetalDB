@@ -32,7 +32,7 @@ TESTS := test_gpu_scan_equals test_gpu_sum test_scan_hybrid test_persist_pages t
          test_engine test_groupby test_join test_types test_string_gpu test_compound_where \
          test_c_api test_mini_sql test_server test_wal test_atomic test_sql_where \
          test_sql_groupby test_copy test_tools test_server_concurrency \
-         test_pgwire test_gpu_groupby test_pg_catalog test_transactions
+         test_pgwire test_gpu_groupby test_pg_catalog test_transactions test_sql_join
 
 all: $(METALLIB_SRCS) $(TESTS) libmdb.a
 
@@ -132,6 +132,9 @@ test_gpu_groupby: $(OBJS) tests/test_gpu_groupby.cpp
 test_transactions: $(OBJS) tests/test_transactions.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+test_sql_join: $(OBJS) tests/test_sql_join.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 bench_gpu: $(OBJS) tests/bench_gpu.cpp
 	$(CXX) $(CXXFLAGS) -O2 $^ -o $@ $(LDFLAGS)
 
@@ -190,6 +193,7 @@ run: all
 	./test_gpu_groupby
 	./test_pg_catalog
 	./test_transactions
+	./test_sql_join
 
 # Quick single-test runner: make fast TEST=test_gpu_sum
 fast: $(TESTS)
@@ -221,7 +225,7 @@ CPU_CORE     := MasterPage ColumnFile RowIndex Table Engine GroupBy Join MiniSQL
 CPU_OBJS     := $(addprefix $(CPU_DIR)/,$(addsuffix .o,$(CPU_CORE)))
 CPU_TESTS    := test_scan_hybrid test_persist_pages test_where_range test_engine test_groupby \
                 test_join test_types test_string_gpu test_compound_where test_mini_sql \
-                test_server test_wal test_atomic test_sql_where test_sql_groupby test_copy test_tools test_server_concurrency test_pgwire test_gpu_groupby test_pg_catalog test_transactions test_multipage test_persistence test_reuse test_scan_sum \
+                test_server test_wal test_atomic test_sql_where test_sql_groupby test_copy test_tools test_server_concurrency test_pgwire test_gpu_groupby test_pg_catalog test_transactions test_sql_join test_multipage test_persistence test_reuse test_scan_sum \
                 test_table test_table_persist test_c_api
 CPU_BINS     := $(addprefix $(CPU_DIR)/,$(CPU_TESTS)) $(CPU_DIR)/mdb $(CPU_DIR)/libmdb.so
 

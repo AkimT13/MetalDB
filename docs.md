@@ -136,6 +136,8 @@ Supported query shape:
     (numeric literals for numeric columns, string literals for STRING columns;
     strings compare byte-wise)
   - `cN [NOT] BETWEEN a AND b`, `cN [NOT] IN (v1, v2, ...)`
+  - column-to-column comparisons `cA <op> cB` (both numeric, or both STRING; integers
+    compare exactly across UINT32 / INT64), evaluated as a CPU scan
   - `AND`, `OR`, `NOT`, and parentheses with standard precedence (NOT > AND > OR)
   - UINT32 `=` / range leaves use the zone-map-pruned hybrid GPU/CPU scans; other
     leaves are CPU scans combined with sorted row-ID set algebra
@@ -152,6 +154,31 @@ Supported query shape:
 - optional `ORDER BY key [ASC|DESC] [, ...]` where `key` is a selected column, a selected
   aggregate (`count(*)`, `sum(c1)`, ...) or a 1-based output position
 - optional `LIMIT n [OFFSET m]`
+- an optional alias after the table (`FROM '/tmp/demo' [AS] d`), and qualified columns
+  (`d.c0`, or `name.c0` without an alias)
+
+Joins:
+- `SELECT ... FROM a [AS x] [INNER] JOIN b [AS y] ON x.cN = y.cM [AND x.cP = y.cQ ...]
+  [JOIN c ...]`, followed by the usual `WHERE` / `GROUP BY` / `ORDER BY` / `LIMIT`
+- any number of tables, left-deep; each `ON` compares a column of the table being joined
+  with a column of an earlier one. Self-joins work with aliases.
+- key types must match in kind: integers with integers (UINT32 = INT64 is fine), FLOAT /
+  DOUBLE with each other, STRING with STRING. NaN never matches.
+- columns are referenced as `alias.cN` (the alias defaults to the table name). An
+  unqualified `cN` is accepted when only one table has that column, and is otherwise
+  rejected as ambiguous. `*` and `alias.*` expand in FROM order.
+- output headers are qualified: `u.c1`, `count(*)`, `sum(o.c2)`
+- `WHERE` conjuncts that only involve one table are pushed into that table's scan, where
+  they keep zone maps and the GPU-capable scans; conjuncts that span tables (an `OR`
+  across them, `a.c0 < b.c0`) run on joined rows. The join itself is a CPU hash join that
+  builds on the joined table, and only the columns the statement reads are materialized.
+  `EXPLAIN` shows each scan, the join's build / probe sizes, and the residual filter.
+- aggregates, `GROUP BY`, `DISTINCT`, `ORDER BY` on columns that are not selected,
+  `COPY (SELECT ... JOIN ...) TO`, transactions (pending rows join), and prepared
+  statements all work as on one table
+- a join locks each of its tables for the duration of the statement, in a fixed order
+- not supported: `LEFT` / `RIGHT` / `FULL` / `CROSS` / `NATURAL` joins, `USING`,
+  comma-separated `FROM` lists, and non-equality `ON` conditions (put those in `WHERE`)
 
 Write / catalog statements:
 - `CREATE TABLE '/tmp/demo' (UINT32, STRING)` or `(c0 UINT32, c1 STRING)`;
@@ -211,7 +238,7 @@ Parameters and names:
 Important limits:
 - table references are paths (relative to `--data-dir` in server mode), not catalog objects
 - columns are synthetic identifiers `c0`, `c1`, ...
-- joins, aliases, arithmetic expressions, subqueries, and CTEs are not supported
+- outer joins, arithmetic expressions, subqueries, and CTEs are not supported
 - in aggregate / GROUP BY queries, `ORDER BY` keys must appear in the `SELECT` list
 - no `HAVING` yet
 
